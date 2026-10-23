@@ -1,6 +1,6 @@
 {
   "name": "opencode-lacuna",
-  "version": "0.1.0",
+  "version": "0.0.0",
   "description": "OpenCode plugin that lets the model archive parts of its own context and restore them later.",
   "type": "module",
   "license": "MIT",
