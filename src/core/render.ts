@@ -1,0 +1,157 @@
+import { activeSpans, refsOf } from "./state.ts"
+import type { Block, Msg, Part, SessionState, Unit } from "./types.ts"
+
+const ARCHIVE_TOOL = "archive"
+
+export const formatTokens = (tokens: number) =>
+  tokens >= 1000 ? `${(tokens / 1000).toFixed(tokens >= 10_000 ? 0 : 1)}k` : String(tokens)
+
+const refTag = (ref: string, unit: Unit) => `<ref id="${ref}" tokens="${formatTokens(unit.tokens)}" kind="${unit.label}"/>`
+
+const blockText = (block: Block) => {
+  const topic = block.topic ? ` topic="${block.topic.replaceAll('"', "'")}"` : ""
+  return `<archived block="${block.id}" range="${block.start}–${block.end}" tokens="${formatTokens(block.tokens)}"${topic}>\n${block.summary}\n</archived>`
+}
+
+// Full-format ref tags only, so prose that mentions a short `<ref id="…"/>` is left alone.
+const ECHOED_TAG = /[ \t]*<ref id="[^"]*" tokens="[^"]*" kind="[^"]*"\/>[ \t]*\n?/g
+
+/**
+ * Models imitate the ref tags they see, and the host stores that text.
+ * Strip them so they are not duplicated, counted, or shown to the model as part of the message.
+ */
+export const stripEchoedTags = (message: Msg): Msg | undefined => {
+  if (message.role !== "assistant") return undefined
+  let changed = false
+  const content = message.content.flatMap((part) => {
+    if (part.type !== "text" || typeof part.text !== "string" || !part.text.includes("<ref id=")) return [part]
+    const text = part.text.replace(ECHOED_TAG, "")
+    if (text === part.text) return [part]
+    changed = true
+    return text.trim() ? [{ ...part, text }] : []
+  })
+  return changed ? { ...message, content } : undefined
+}
+
+/** Message factory, so the adapter can build host-native message objects. */
+export type MakeMessage = (message: Msg) => Msg
+
+interface RenderResult {
+  readonly messages: Msg[]
+  readonly tokens: number
+  readonly originalTokens: number
+}
+
+const prependText = (message: Msg, text: string): Part[] => [{ type: "text", text }, ...message.content]
+
+/**
+ * Put a tag at the start of a tool result's output. Returns undefined for result shapes it cannot carry.
+ * Tags never go inside assistant messages: the model imitates whatever its own turns start with.
+ */
+const tagToolResult = (part: Part, tag: string): Part | undefined => {
+  const result = part.result as { type?: string; value?: unknown } | undefined
+  if (!result || typeof result !== "object") return undefined
+  switch (result.type) {
+    case "text":
+    case "error-text":
+      return { ...part, result: { ...result, value: `${tag}\n${String(result.value ?? "")}` } }
+    case "content":
+      return Array.isArray(result.value) ? { ...part, result: { ...result, value: [{ type: "text", text: tag }, ...result.value] } } : undefined
+    case "json":
+    case "error-json":
+      return { ...part, result: { type: result.type === "json" ? "text" : "error-text", value: `${tag}\n${JSON.stringify(result.value)}` } }
+    default:
+      return undefined
+  }
+}
+
+/** Tags the unit's first tool result. Returns the new messages, or undefined if no result could carry the tag. */
+const tagUnitResults = (unit: Unit, tag: string, make: MakeMessage): Msg[] | undefined => {
+  let tagged = false
+  const messages = unit.messages.map((message) => {
+    if (tagged || message.role !== "tool") return message
+    const index = message.content.findIndex((part) => part.type === "tool-result")
+    if (index === -1) return message
+    const part = tagToolResult(message.content[index]!, tag)
+    if (!part) return message
+    tagged = true
+    return make({ ...message, content: message.content.map((existing, j) => (j === index ? part : existing)) })
+  })
+  return tagged ? messages : undefined
+}
+
+// The summary already lives in the block, so keeping it in the call arguments would pay for it twice.
+const slimArchiveCall = (part: Part): Part => {
+  if (part.type !== "tool-call" || part.name !== ARCHIVE_TOOL) return part
+  const input = part.input as { ranges?: unknown } | undefined
+  if (!input || !Array.isArray(input.ranges)) return part
+  return {
+    ...part,
+    input: {
+      ...input,
+      ranges: input.ranges.map((range: Record<string, unknown>) => ({ ...range, summary: "[Saved as written. Shown in the archived block, not repeated here.]" })),
+    },
+  }
+}
+
+export const render = (state: SessionState, units: readonly Unit[], make: MakeMessage): RenderResult => {
+  const refs = refsOf(state, units)
+  const spans = new Map(activeSpans(state, units).map((span) => [span.from, span]))
+  const messages: Msg[] = []
+  let tokens = 0
+  let originalTokens = 0
+  // Tags for assistant replies without tool results ride on the next user-role message.
+  let pending: string[] = []
+  const takePending = () => {
+    const prefix = pending.length ? `${pending.join("\n")}\n` : ""
+    pending = []
+    return prefix
+  }
+
+  for (let i = 0; i < units.length; i++) {
+    const span = spans.get(i)
+    if (span) {
+      const text = takePending() + blockText(span.block)
+      messages.push(make({ role: "user", content: [{ type: "text", text }] }))
+      tokens += Math.ceil(text.length / 4)
+      for (const unit of units.slice(span.from, span.to + 1)) {
+        originalTokens += unit.tokens
+        // Mid-conversation system messages carry host state (e.g. reasoning effort changes), so they survive archiving.
+        if (unit.role === "system") messages.push(...unit.messages)
+      }
+      i = span.to
+      continue
+    }
+
+    const unit = units[i]!
+    const tag = refTag(refs[i]!, unit)
+    originalTokens += unit.tokens
+    tokens += unit.tokens
+    if (unit.role === "system") messages.push(...unit.messages)
+    else if (unit.role === "user") {
+      unit.messages.forEach((message, index) =>
+        messages.push(index === 0 ? make({ ...message, content: prependText(message, takePending() + tag) }) : message),
+      )
+    } else {
+      const slimmed = unit.messages.map((message) => {
+        if (message.role === "tool") return message
+        const content = message.content.map(slimArchiveCall)
+        return content.some((part, j) => part !== message.content[j]) ? make({ ...message, content }) : message
+      })
+      const tagged = tagUnitResults({ ...unit, messages: slimmed }, tag, make)
+      if (tagged) messages.push(...tagged)
+      else {
+        messages.push(...slimmed)
+        pending.push(tag)
+      }
+    }
+
+    const note = state.nudges?.[refs[i]!]
+    if (note) {
+      messages.push(make({ role: "system", content: [{ type: "text", text: note }] }))
+      tokens += Math.ceil(note.length / 4)
+    }
+  }
+
+  return { messages, tokens, originalTokens }
+}
