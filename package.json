@@ -24,19 +24,13 @@
     "@opencode/plugin": "^2.1.4"
   },
   "peerDependencies": {
+    "@opentui/core": ">=0.6.8",
     "@opentui/solid": ">=0.6.8",
     "solid-js": ">=1.9.0"
   },
-  "peerDependenciesMeta": {
-    "@opentui/solid": {
-      "optional": true
-    },
-    "solid-js": {
-      "optional": true
-    }
-  },
   "devDependencies": {
     "@opencode/theme": "^2.1.4",
+    "@opentui/core": "^0.6.8",
     "@opentui/solid": "^0.6.8",
     "@types/node": "^24.0.0",
     "solid-js": "^1.9.12",
