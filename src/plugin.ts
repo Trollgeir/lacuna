@@ -134,10 +134,23 @@ export default Plugin.define({
       if (state) republish(sessionID, state)
     }
 
+    const forget = async (sessionID: string) => {
+      for (const map of [states, live, measured, pending, latest]) map.delete(sessionID)
+      await ctx.storage.remove(`session/${sessionID}`)
+      const prefix = `snapshot/${sessionID}/`
+      let after: string | undefined
+      do {
+        const page = await ctx.storage.scan({ prefix, after })
+        for (const entry of page.entries) await ctx.storage.remove(entry.key)
+        after = page.next
+      } while (after)
+    }
+
     const events = new AbortController()
     void (async () => {
       try {
         for await (const event of ctx.event.subscribe({ signal: events.signal })) {
+          if (event.type === "session.deleted") await forget(event.data.sessionID).catch(() => {})
           if (event.type !== "session.step.ended") continue
           await record(event.data.sessionID, event.created, promptTokens(event.data.tokens)).catch(() => {})
         }

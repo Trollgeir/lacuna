@@ -77,7 +77,7 @@ To run your clone, set `"package"` to its absolute path instead of `opencode-lac
 - No automatic cleanup of duplicate or failed tool output; everything is model-driven.
 - Unless disabled (`"compaction": { "auto": false }`), OpenCode's own compaction still runs at the context limit and
   summarises the material that was never archived.
-- Saved originals are never deleted, so a long session's storage grows with everything it has archived.
+- Saved originals are kept until the session is deleted, so a long session's storage grows with everything it has archived. Sessions deleted while Lacuna isn't loaded leave their saved data behind.
 
 ## Acknowledgements
 
