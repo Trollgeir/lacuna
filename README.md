@@ -47,17 +47,12 @@ lists the tiers in each model's `cost` metadata; if yours is lower, set `nudgeAt
 
 ## Install
 
-Clone the repository and add the directory to `plugins` in `opencode.json`:
-
-```sh
-git clone https://github.com/Trollgeir/lacuna
-cd lacuna && npm install
-```
+Add the package to `plugins` in `opencode.json`. OpenCode installs it from npm on the next start:
 
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugins": [{ "package": "/absolute/path/to/lacuna", "options": { "nudgeAt": 0.6 } }]
+  "plugins": [{ "package": "opencode-lacuna", "options": { "nudgeAt": 0.6 } }]
 }
 ```
 
@@ -68,12 +63,13 @@ Don't run another context pruning plugin at the same time: two plugins rewriting
 ## Develop
 
 ```sh
-npm install
+git clone https://github.com/Trollgeir/lacuna
+cd lacuna && npm install
 npm test          # node --test, core logic
 npm run typecheck
 ```
 
-Local plugin directories are hot-reloaded by OpenCode, so edits take effect without a restart.
+To run your clone, set `"package"` to its absolute path instead of `opencode-lacuna`. Local plugin directories are hot-reloaded by OpenCode, so edits take effect without a restart.
 
 ## Limitations
 
