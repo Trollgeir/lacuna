@@ -33,9 +33,14 @@ If multiple ranges are archived, the earliest range determines it.
 | Range | Tokens | Prefix preserved |
 | --- | ---: | ---: |
 ${candidates.map((range) => `| ${range.start}–${range.end} | ${formatTokens(range.tokens)} | ${formatTokens(range.prefixPreserved)} |`).join("\n")}` : ""
+  // The Output section is needed because session.generate returns plain text and has no structured-output option.
+  // Replace it with a schema or forced tool call once session.generate supports one.
   return `${instructions}${protectedMessage}${suggestedRanges}
 
-## Output schema
+## Output
+
+Your entire reply is parsed by a program with JSON.parse, so it must be a bare JSON array that matches
+this JSON Schema. Do not add commentary or a Markdown code fence. The first character must be \`[\`.
 
 ${JSON.stringify(outputSchema, null, 2)}`
 }
