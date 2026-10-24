@@ -12,9 +12,8 @@ export const unsnapshotted = (state: SessionState, units: readonly Unit[]): { re
   const refs = refsOf(state, units)
   const stored = state.snapshots ?? {}
   return activeSpans(state, units).flatMap((span) =>
-    units
-      .slice(span.from, span.to + 1)
-      .map((unit, i) => ({ ref: refs[span.from + i]!, unit }))
+    span.indexes
+      .map((index) => ({ ref: refs[index]!, unit: units[index]! }))
       .filter(({ ref }) => !stored[ref]),
   )
 }
@@ -35,12 +34,12 @@ export const detachedRefs = (state: SessionState, units: readonly Unit[]): strin
   const through = state.compactedThrough
   if (!through) return []
   const checkpoint = units.findLast((unit) => unit.role === "user" && unit.text.includes(CHECKPOINT))
-  if (!checkpoint) return []
+  if (!checkpoint?.key) return []
   const before = Math.min(through, refNumber(state.refs[checkpoint.key]!) - 1)
   const present = new Set(refsOf(state, units))
-  return Object.keys(state.snapshots ?? {})
+  return (state.compactedKeys ?? []).map((key) => state.refs[key]!)
+    .filter((ref) => state.snapshots?.[ref])
     .filter((ref) => refNumber(ref) <= before && !present.has(ref))
-    .sort((a, b) => refNumber(a) - refNumber(b))
 }
 
 /** Rebuilds a stored unit from its messages, under its original key so it keeps its ref. */
@@ -56,8 +55,9 @@ export const unitFromSnapshot = (key: string, messages: readonly Msg[]): Unit | 
  */
 export const prepareCompaction = (state: SessionState, context: readonly Unit[], incoming: readonly Unit[]): Msg[] => {
   const refs = refsOf(state, context)
-  const archived = new Set(activeSpans(state, context).flatMap((span) => refs.slice(span.from, span.to + 1)))
-  const numbers = refsOf(state, incoming).map(refNumber)
+  const archived = new Set(activeSpans(state, context).flatMap((span) => span.indexes.map((index) => refs[index]!)))
+  const numbers = refsOf(state, incoming).flatMap((ref) => ref ? [refNumber(ref)] : [])
   if (numbers.length) state.compactedThrough = Math.max(state.compactedThrough ?? 0, ...numbers)
-  return incoming.filter((unit) => !archived.has(state.refs[unit.key]!)).flatMap((unit) => unit.messages)
+  state.compactedKeys = context.flatMap((unit) => unit.key ? [unit.key] : [])
+  return incoming.filter((unit) => !unit.key || !archived.has(state.refs[unit.key]!)).flatMap((unit) => unit.messages)
 }

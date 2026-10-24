@@ -6,6 +6,8 @@ const stats = Schema.Struct({
   sessionID: Schema.String,
   /** Estimated tokens currently removed from the context by archiving. */
   archived: Schema.Finite,
+  /** Block IDs whose summaries cannot be placed because no captured members are present. */
+  unresolved: Schema.optionalKey(Schema.Array(Schema.String)),
   /** Summaries await application, or context changes await a completed primary response. */
   changed: Schema.optionalKey(Schema.Boolean),
   job: Schema.optionalKey(archiveJobStatus),

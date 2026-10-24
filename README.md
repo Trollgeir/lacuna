@@ -8,7 +8,7 @@ and leaves the main agent free to continue working. The main agent can bring the
 
 ## How it works
 
-1. Conversation units carry ref tags with their ID and kind:
+1. Identifiable conversation units carry ref tags with their ID and kind:
    `<ref id="m12" kind="tools:read"/>`. These tags are visible to the model, not shown in the UI.
 2. After a response, if context exceeds `archiveAt`, Lacuna starts a background archive job. The archive agent
    chooses ranges and writes summaries, or keeps everything unchanged. Ready summaries replace their ranges
@@ -18,6 +18,10 @@ and leaves the main agent free to continue working. The main agent can bring the
 
 Lacuna builds a **projection** of the session for each model request: archived ranges appear as summaries,
 while stored session history stays unchanged. Disable the plugin and the original conversation is available again.
+
+Blocks remember the unit identities actually archived, so model switches can remove individual messages without
+replaying the surviving archived content. Newly revealed messages stay visible. If none of a block's members are
+present, the footer reports it as unresolved; `/lacuna` lists the affected blocks.
 
 ## But this ruins the prompt cache?
 
@@ -67,6 +71,7 @@ To run your clone, set `"package"` to its absolute path instead of `opencode-lac
 
 - Token figures are estimates (characters ÷ 4), corrected against the usage the provider reports.
 - No automatic cleanup of duplicate or failed tool output; everything is model-driven.
+- Units without a durable message or tool-result identity remain visible and cannot be archived.
 - Unless disabled (`"compaction": { "auto": false }`), OpenCode's own compaction still runs at the context limit and
   summarises the material that was never archived.
 - Saved originals are kept until the session is deleted, so a long session's storage grows with everything it has archived. Sessions deleted while Lacuna isn't loaded leave their saved data behind.

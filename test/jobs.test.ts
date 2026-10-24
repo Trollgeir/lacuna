@@ -53,6 +53,26 @@ test("worker selects ranges from a snapshot and commits only at a later request"
   assert.match(jobs.report(), /applied/)
 })
 
+test("worker can archive across an unidentified latest user without undefined protection refs", async () => {
+  const state = emptyState()
+  const latest: Msg = { role: "user", content: [{ type: "text", text: "UNIDENTIFIED_LATEST_USER" }] }
+  const units = groupUnits([...messages().slice(0, -1), latest, {
+    id: "a3", role: "assistant", content: [{ type: "text", text: "Completed follow-up work.\n".repeat(100) }],
+  }])
+  assignRefs(state, units)
+  const jobs = new ArchiveJobs()
+  jobs.start(state, units, model, async (prompt) => {
+    assert.doesNotMatch(prompt, /## Protected message|undefined/)
+    return JSON.stringify([{ ...range, end: "m4" }])
+  })
+  await setImmediate()
+  assert.match(jobs.report(), /ready/)
+  const candidate = jobs.apply(state, units, model)!
+  assert.ok(candidate)
+  assert.deepEqual(candidate.blocks.b1!.unitKeys, ["u1", "a1", "a2", "a3"])
+  assert.match(JSON.stringify(projectContext(candidate, units).messages), /UNIDENTIFIED_LATEST_USER/)
+})
+
 test("validates worker-selected ranges and rejects duplicate pending jobs", async () => {
   for (const ranges of [
     [{ ...range, end: "m4" }],

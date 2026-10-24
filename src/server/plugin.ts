@@ -27,6 +27,7 @@ interface Live {
   units: Unit[]
   tokens: number
   originalTokens: number
+  unresolved: readonly string[]
   limit?: number
   model: string
   request: ModelContext
@@ -144,9 +145,9 @@ export default Plugin.define({
       const factor = factors.get(model)?.factor ?? 1
       return { factor, overhead: measured?.overhead ?? 0, scale: (estimate: number) => Math.round(factor * estimate) }
     }
-    const corrected = (sessionID: string, view: Pick<Live, "tokens" | "originalTokens" | "model">) => {
+    const corrected = (sessionID: string, view: Pick<Live, "tokens" | "originalTokens" | "model" | "unresolved">) => {
       const { overhead, scale } = scaleFor(sessionID, view.model)
-      return { tokens: overhead + scale(view.tokens), originalTokens: overhead + scale(view.originalTokens) }
+      return { tokens: overhead + scale(view.tokens), originalTokens: overhead + scale(view.originalTokens), unresolved: view.unresolved }
     }
 
     const rpc = await ctx.rpc.register(Lacuna, {
@@ -155,7 +156,7 @@ export default Plugin.define({
         return stats ? { stats: { ...stats } } : {}
       },
     })
-    const publish = (sessionID: string, totals?: { tokens: number; originalTokens: number }) => {
+    const publish = (sessionID: string, totals?: { tokens: number; originalTokens: number; unresolved: readonly string[] }) => {
       if (disposed) return
       const session = sessions.get(sessionID)
       if (!session) return
@@ -163,6 +164,7 @@ export default Plugin.define({
       const stats: Stats = {
         sessionID,
         archived: totals ? Math.max(0, totals.originalTokens - totals.tokens) : session.latest?.archived ?? 0,
+        unresolved: [...(totals?.unresolved ?? session.latest?.unresolved ?? [])],
         changed: job?.status === "ready" || hasChanges(sessionID),
         ...(job ? { job } : {}),
       }
@@ -185,6 +187,7 @@ export default Plugin.define({
       const totals = projectContext(state, view.units)
       view.tokens = totals.tokens
       view.originalTokens = totals.originalTokens
+      view.unresolved = totals.unresolved
       publish(sessionID, corrected(sessionID, view))
     }
 
@@ -388,7 +391,7 @@ export default Plugin.define({
       const result = projectContext(state, units, make)
       const limit = await contextLimit(event.model.providerID, event.model.id)
       await modelFactor(model)
-      const view: Live = { units, tokens: result.tokens, originalTokens: result.originalTokens, limit, model, request: event }
+      const view: Live = { units, tokens: result.tokens, originalTokens: result.originalTokens, unresolved: result.unresolved, limit, model, request: event }
       session.view = view
       session.pending = [...session.pending.slice(-4), {
         at: Date.now(), estimate: result.tokens, model, revision: session.revision, view,

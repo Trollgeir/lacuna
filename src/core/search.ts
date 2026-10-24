@@ -1,4 +1,4 @@
-import { refsOf } from "./state.ts"
+import { blockSpan } from "./state.ts"
 import type { Block, SessionState, Unit } from "./types.ts"
 
 interface SearchHit {
@@ -30,13 +30,9 @@ const snippet = (text: string, term: string, radius = 120) => {
 export const search = (state: SessionState, units: readonly Unit[], query: string, limit = 5): SearchHit[] => {
   const words = terms(query)
   if (!words.length) return []
-  const index = new Map(refsOf(state, units).map((ref, i) => [ref, i]))
-
   return Object.values(state.blocks)
     .map((block) => {
-      const from = index.get(block.start)
-      const to = index.get(block.end)
-      const original = from === undefined || to === undefined ? "" : units.slice(from, to + 1).map((unit) => unit.text).join("\n")
+      const original = blockSpan(block, units)?.indexes.map((index) => units[index]!.text).join("\n") ?? ""
       const summary = `${block.topic ?? ""}\n${block.summary}`
       const lowerSummary = summary.toLowerCase()
       const lowerOriginal = original.toLowerCase()

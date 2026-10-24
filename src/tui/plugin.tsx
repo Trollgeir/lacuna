@@ -62,6 +62,9 @@ export default Plugin.define({
                 <Show when={value().changed}>
                   <text fg={theme().text.feedback.info.base}>*</text>
                 </Show>
+                <Show when={value().unresolved?.length}>
+                  <text fg={theme().text.feedback.warning.base}>{`unresolved (${value().unresolved!.length})`}</text>
+                </Show>
               </box>
             )
           }}
@@ -99,7 +102,7 @@ export default Plugin.define({
       mode: "global",
       commands: [{
         id: "lacuna.job",
-        title: "Show archive job",
+          title: "Show archive status",
         group: "Lacuna",
         palette: true,
         slash: { name: "lacuna" },
@@ -108,10 +111,15 @@ export default Plugin.define({
           const route = context.ui.router.current()
           if (route.type !== "session") return
           await feed.fetch(route.sessionID)
-          const job = feed.get(route.sessionID)?.job
+          const status = feed.get(route.sessionID)
+          const job = status?.job
+          const unresolved = status?.unresolved ?? []
           await context.ui.dialog.alert({
-            title: "Lacuna archive jobs",
-            message: job ? jobDetails(job, Date.now()) : "No background archive job in this session.",
+            title: "Lacuna archive status",
+            message: [
+              job ? jobDetails(job, Date.now()) : "No background archive job in this session.",
+              ...(unresolved.length ? ["", `Unresolved blocks: ${unresolved.join(", ")}`, "No captured members are present, so these summaries cannot be placed in the current context."] : []),
+            ].join("\n"),
           })
         },
       }],

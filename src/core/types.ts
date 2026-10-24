@@ -18,7 +18,8 @@ export interface Msg {
  * Grouping this way means archiving can never split a tool call from its result.
  */
 export interface Unit {
-  readonly key: string
+  /** Absent when the host supplies no durable identity; those units cannot be archived. */
+  readonly key?: string
   readonly role: "system" | "user" | "assistant"
   readonly messages: readonly Msg[]
   readonly tokens: number
@@ -30,6 +31,8 @@ export interface Block {
   readonly id: string
   readonly start: string
   readonly end: string
+  /** Ordered identities of the units captured by this archive; refs are display labels only. */
+  readonly unitKeys: readonly string[]
   readonly summary: string
   readonly topic?: string
   /** Estimated tokens of the original messages the block replaces. */
@@ -49,8 +52,10 @@ export interface SessionState {
   blocks: Record<string, Block>
   /** Refs whose original messages are stored, so they outlive compaction. */
   snapshots?: Record<string, true>
-  /** Highest ref number a compaction has summarised; stored units up to it are no longer sent by the host. */
+  /** Ref allocation watermark at compaction; used only to distinguish checkpoint/revert boundaries. */
   compactedThrough?: number
+  /** Transcript order at the latest compaction, so detached originals are never sorted by ref number. */
+  compactedKeys?: string[]
 }
 
 export const emptyState = (): SessionState => ({

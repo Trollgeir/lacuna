@@ -65,6 +65,65 @@ test("archive replaces a range into a summary and keeps tool pairs intact", () =
   assert.ok(out.tokens < out.originalTokens)
 })
 
+test("archives survive missing endpoints and never hide newly revealed units", () => {
+  const messages = [user("u1", "previous"), assistant("a1", "start"), assistant("a2", "archived zebra"), assistant("a3", "end"), user("u2", "current")]
+  const state = emptyState()
+  const original = groupUnits(messages)
+  assignRefs(state, original)
+  archive(state, original, [{ start: "m2", end: "m4", summary: "Archived work." }])
+
+  for (const missing of [["a1"], ["a3"], ["a1", "a3"], []]) {
+    const visible = messages.filter((message) => !missing.includes(message.id!))
+    visible.splice(visible.findIndex((message) => message.id === "a2"), 0, assistant("new", "NEW_VISIBLE"))
+    const units = groupUnits(visible)
+    assignRefs(state, units)
+    const out = JSON.stringify(projectContext(state, units).messages)
+    assert.match(out, /Archived work\./)
+    assert.doesNotMatch(out, /archived zebra/)
+    assert.match(out, /NEW_VISIBLE/)
+    assert.equal((out.match(/Archived work\./g) ?? []).length, 1)
+    assert.deepEqual(projectContext(state, units).unresolved, [])
+    assert.ok(candidates(state, units.map((unit) => ({ ...unit, tokens: 2000 }))).some((candidate) => candidate.start === state.refs.new))
+    assert.ok(unsnapshotted(state, units).every(({ unit }) => unit.key !== "new"), "snapshot only captured members")
+  }
+})
+
+test("units without stable identities stay visible and cannot be archived", () => {
+  const messages: Msg[] = [user("u1", "previous"), { role: "assistant", content: [{ type: "text", text: "anonymous first" }] }, { role: "assistant", content: [{ type: "text", text: "anonymous second" }] }, assistant("a1", "known"), user("u2", "current")]
+  const state = emptyState()
+  const units = groupUnits(messages)
+  assignRefs(state, units)
+  assert.equal(Object.keys(state.refs).length, 3, "anonymous units must not receive refs")
+  const [result] = archive(state, units, [{ start: "m1", end: state.refs.a1!, summary: "Known work." }])
+  assert.deepEqual(result!.block.unitKeys, ["u1", "a1"], "unidentified units inside a range must not be captured")
+  assert.equal(result!.messages, 2)
+  const out = JSON.stringify(projectContext(state, groupUnits(messages.slice(1))).messages)
+  assert.match(out, /Known work/)
+  assert.match(out, /anonymous first/)
+  assert.match(out, /anonymous second/)
+  assert.doesNotMatch(out, /undefined|anon:/)
+  assert.deepEqual(unsnapshotted(state, units).map(({ unit }) => unit.key), ["u1", "a1"])
+  assert.deepEqual(prepareCompaction(state, units, units).map((message) => message.id), [undefined, undefined, "u2"])
+  restore(state, "b1")
+  const sized = units.map((unit) => ({ ...unit, tokens: 2000 }))
+  assert.deepEqual(candidates(state, sized).map(({ start, end }) => [start, end]), [["m2", "m2"], ["m1", "m1"]])
+})
+
+test("ranges spanning an unidentified latest user archive only identified messages", () => {
+  const latest: Msg = { role: "user", content: [{ type: "text", text: "UNIDENTIFIED_LATEST_USER" }] }
+  const units = groupUnits([user("u1", "previous request"), assistant("a1", "previous work"), latest, assistant("a2", "current work")])
+  const state = emptyState()
+  assignRefs(state, units)
+  const [result] = archive(state, units, [{ start: "m1", end: "m3", summary: "Completed work." }])
+  assert.deepEqual(result!.block.unitKeys, ["u1", "a1", "a2"], "do not fall back to protecting an earlier identified user")
+  assert.equal(result!.messages, 3)
+  const projected = projectContext(state, units, identity).messages
+  assert.ok(projected.includes(latest), "the unidentified latest user must stay visible")
+  assert.match(JSON.stringify(projected), /Completed work\./)
+  assert.doesNotMatch(JSON.stringify(projected), /previous request|previous work|current work|undefined/)
+  assert.deepEqual(unsnapshotted(state, units).map(({ unit }) => unit.key), ["u1", "a1", "a2"])
+})
+
 test("protects the latest user message but allows archiving work in the current turn", () => {
   const { state, units } = setup()
   assert.throws(() => archive(state, units, [{ start: "m3", end: "m4", summary: "x" }]), /latest user message/)
@@ -115,6 +174,31 @@ test("nested blocks restore one level at a time", () => {
   restore(state, "b1")
   const full = projectContext(state, units, identity)
   assert.ok(full.messages.some((m) => m.role === "tool"))
+})
+
+test("nesting a partially visible block preserves its complete ordered membership", () => {
+  const state = emptyState()
+  const messages = [user("u1", "previous"), assistant("a1", "start"), assistant("a2", "zebra original"), assistant("a3", "end"), user("u2", "current")]
+  const units = groupUnits(messages)
+  assignRefs(state, units)
+  archive(state, units, [{ start: "m2", end: "m4", summary: "inner" }])
+  const partial = groupUnits(messages.filter((message) => !["a1", "a3"].includes(message.id!)))
+  const [outer] = archive(state, partial, [{ start: "m1", end: "b1", summary: "outer" }])
+  assert.deepEqual(outer!.block.unitKeys, ["u1", "a1", "a2", "a3"])
+  const changed = groupUnits([messages[0]!, messages[1]!, user("new", "NEW_VISIBLE"), messages[2]!, messages[3]!, messages[4]!])
+  assignRefs(state, changed)
+  assert.equal(search(state, partial, "zebra")[0]?.block.id, "b1", "nested search uses surviving members, not endpoints")
+  assert.deepEqual(search(state, changed, "NEW_VISIBLE"), [], "newly visible originals belong to neither block")
+  assert.deepEqual(projectContext(state, groupUnits([messages[4]!])).unresolved, ["b2"], "report only the absent top-level block, not its nested child")
+  assert.throws(() => archive(state, changed, [{ start: "m2", end: "m3", summary: "overlap" }]), /partially overlaps/)
+  assert.deepEqual(prepareCompaction(state, changed, changed).map((message) => message.id), ["new", "u2"])
+  restore(state, "b2")
+  const once = JSON.stringify(projectContext(state, changed).messages)
+  assert.match(once, /inner/)
+  assert.match(once, /NEW_VISIBLE/)
+  assert.doesNotMatch(once, /zebra original/)
+  restore(state, "b1")
+  assert.match(JSON.stringify(projectContext(state, changed).messages), /zebra original/)
 })
 
 test("never puts ref tags inside assistant messages", () => {
@@ -256,6 +340,27 @@ test("archived blocks survive compaction and only unarchived units are summarise
 
   restore(state, "b1")
   assert.match(JSON.stringify(projectContext(state, combined, identity).messages), /zebra/)
+})
+
+test("late-visible refs archive and restore across compaction in transcript order", () => {
+  const state = emptyState()
+  const messages = [user("u1", "previous"), assistant("late", "reasoning revealed"), assistant("a1", "archived zebra"), user("u2", "current")]
+  assignRefs(state, groupUnits(messages.filter((message) => message.id !== "late")))
+  const units = groupUnits(messages)
+  assignRefs(state, units)
+  assert.deepEqual(refsOf(state, units), ["m1", "m4", "m2", "m3"])
+  archive(state, units, [{ start: "m4", end: "m2", summary: "Completed work." }])
+  const snapshots = new Map(unsnapshotted(state, units).map(({ ref, unit }) => [ref, unit]))
+  markSnapshotted(state, [...snapshots.keys()])
+  assert.deepEqual(prepareCompaction(state, units, units).map((message) => message.id), ["u1", "u2"])
+  const after = groupUnits([user("cp", "<conversation-checkpoint>summary</conversation-checkpoint>"), user("u3", "next")])
+  assignRefs(state, after)
+  const detached = detachedRefs(state, after).map((ref) => snapshots.get(ref)!)
+  const combined = [...detached, ...after]
+  assert.match(JSON.stringify(projectContext(state, combined).messages), /Completed work/)
+  restore(state, "b1")
+  assert.deepEqual(projectContext(state, combined).messages.filter((message) => message.role === "assistant").map((message) => message.id), ["late", "a1"])
+  assert.deepEqual(detachedRefs(state, units.slice(0, 2)), [], "reverting before the checkpoint must not resurrect missing units")
 })
 
 test("reverting past a compaction does not bring back reverted archived units", () => {

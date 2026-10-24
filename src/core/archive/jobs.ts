@@ -72,7 +72,7 @@ export class ArchiveJobs {
     this.changed()
     const refs = refsOf(job.state, job.units)
     const prompt = archivePrompt({
-      protectedRefs: protectedIndexes(job.units).map((index) => refs[index]!),
+      protectedRefs: protectedIndexes(job.units).flatMap((index) => refs[index] ? [refs[index]!] : []),
       candidates: candidates(job.state, job.units),
     })
     void Promise.resolve().then(() => {

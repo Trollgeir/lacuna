@@ -106,8 +106,9 @@ const setup = async (options = { archiveAt: 500 }) => {
   // The harness supplies only the modules this plugin consumes.
   const cleanup = (await plugin.setup(context as unknown as Parameters<typeof plugin.setup>[0]))!
   const invoke = (name: string, input: unknown, sessionID = "s1") => tools.get(name)!.execute(input, { sessionID })
-  const hook = async (name: string, messages = transcript(), sessionID = "s1") => {
+  const hook = async (name: string, messages = transcript(), sessionID = "s1", model?: HookEvent["model"]) => {
     const event = makeEvent(messages, sessionID)
+    if (model) event.model = model
     await hooks.get(name)!(event)
     return event
   }
@@ -125,6 +126,62 @@ const setup = async (options = { archiveAt: 500 }) => {
   }
 }
 const output = JSON.stringify([{ start: "m1", end: "m2", summary: "Config /config.ts: port 8080, flag zebra." }])
+
+test("archive ranges spanning unidentified host messages become ready and keep those messages visible", async (t) => {
+  const harness = await setup({ archiveAt: 1_000_000 })
+  t.after(harness.cleanup)
+  const messages: Msg[] = [transcript()[0]!, { role: "system", content: [{ type: "text", text: "UNIDENTIFIED_HOST_STATE" }] }, ...transcript().slice(1)]
+  await harness.hook("context", messages)
+  await harness.invoke("archive", {})
+  await setImmediate()
+  harness.generation.resolve(output)
+  await setImmediate()
+  const ready = (await harness.readStats()).stats!
+  assert.equal(ready.job!.status, "ready")
+  assert.equal(ready.changed, true, "ready summaries must set the footer marker")
+  const next = await harness.hook("context", messages)
+  assert.match(JSON.stringify(next.messages), /<archived block/)
+  assert.match(JSON.stringify(next.messages), /UNIDENTIFIED_HOST_STATE/)
+  assert.doesNotMatch(JSON.stringify(next.messages), /port 8080 zebra/)
+  const applied = (await harness.readStats()).stats!
+  assert.equal(applied.job!.status, "applied")
+  assert.ok(applied.archived > 0)
+})
+
+test("committed archives survive model switches and report wholly absent blocks", async (t) => {
+  const harness = await setup({ archiveAt: 1_000_000 })
+  t.after(harness.cleanup)
+  const messages: Msg[] = [
+    { id: "u1", role: "user", content: [{ type: "text", text: "previous" }] },
+    { id: "reasoning", role: "assistant", content: [{ type: "reasoning", text: "", providerMetadata: { openai: { blob: "fixture" } } }] },
+    ...transcript().slice(1, 3),
+    { id: "end", role: "assistant", content: [{ type: "text", text: "finished" }] },
+    transcript()[3]!,
+  ]
+  await harness.hook("context", messages)
+  await harness.invoke("archive", {})
+  await setImmediate()
+  harness.generation.resolve(JSON.stringify([{ start: "m2", end: "m4", summary: "Completed archived work." }]))
+  await setImmediate()
+  await harness.hook("context", messages)
+  const otherModel = { providerID: "other", id: "claude" }
+  const revealed: Msg = { id: "new", role: "assistant", content: [{ type: "text", text: "NEW_VISIBLE" }] }
+  const switched = [messages[0]!, messages[2]!, messages[3]!, revealed, messages[5]!]
+  const out = await harness.hook("context", switched, "s1", otherModel)
+  assert.match(JSON.stringify(out.messages), /Completed archived work/)
+  assert.match(JSON.stringify(out.messages), /NEW_VISIBLE/)
+  assert.doesNotMatch(JSON.stringify(out.messages), /port 8080 zebra/)
+  assert.match((await harness.invoke("search_archive", { query: "zebra" })).content, /b1/)
+  assert.deepEqual((await harness.readStats()).stats!.unresolved, [])
+  assert.ok((await harness.readStats()).stats!.archived > 0)
+
+  await harness.hook("context", [messages[0]!, revealed, messages[5]!], "s1", otherModel)
+  assert.deepEqual((await harness.readStats()).stats!.unresolved, ["b1"])
+  const returned = await harness.hook("context", messages)
+  assert.match(JSON.stringify(returned.messages), /Completed archived work/)
+  assert.doesNotMatch(JSON.stringify(returned.messages), /port 8080 zebra/)
+  assert.deepEqual((await harness.readStats()).stats!.unresolved, [])
+})
 
 test("pending-context marker covers ready summaries and unacknowledged primary revisions", async (t) => {
   let now = 1000

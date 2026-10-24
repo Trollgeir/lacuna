@@ -5,42 +5,47 @@ const formatRef = (n: number) => `m${n}`
 /** Lookups ignore leading zeros, so `m0012` and `m12` name the same unit. */
 const normalizeRef = (id: string) => id.replace(/^m0+(?=\d)/, "m")
 
-/** Gives every unit a stable ref. Returns true when new refs were assigned. */
+/** Gives identifiable units a stable ref. Returns true when new refs were assigned. */
 export const assignRefs = (state: SessionState, units: readonly Unit[]) => {
   let changed = false
   for (const unit of units) {
-    if (state.refs[unit.key]) continue
+    if (!unit.key || state.refs[unit.key]) continue
     state.refs[unit.key] = formatRef(state.nextRef++)
     changed = true
   }
   return changed
 }
 
-export const refsOf = (state: SessionState, units: readonly Unit[]) => units.map((unit) => state.refs[unit.key]!)
+export const refsOf = (state: SessionState, units: readonly Unit[]) => units.map((unit) => unit.key ? state.refs[unit.key] : undefined)
 
 interface Span {
   readonly block: Block
   readonly from: number
   readonly to: number
+  readonly indexes: readonly number[]
 }
 
-/** Top-level blocks whose endpoints are both still present in the transcript, in order. */
-export const activeSpans = (state: SessionState, units: readonly Unit[]): Span[] => {
-  const index = new Map(refsOf(state, units).map((ref, i) => [ref, i]))
-  return Object.values(state.blocks)
+/** Resolve captured membership against the current transcript, including nested blocks. */
+export const blockSpan = (block: Block, units: readonly Unit[]): Span | undefined => {
+  const keys = new Set(block.unitKeys)
+  const indexes = units.flatMap((unit, i) => unit.key && keys.has(unit.key) ? [i] : [])
+  return indexes.length ? { block, indexes, from: indexes[0]!, to: indexes.at(-1)! } : undefined
+}
+
+/** Top-level blocks with at least one surviving member, in transcript order. */
+export const activeSpans = (state: SessionState, units: readonly Unit[]): Span[] =>
+  Object.values(state.blocks)
     .filter((block) => !block.parent)
     .flatMap((block) => {
-      const from = index.get(block.start)
-      const to = index.get(block.end)
-      return from === undefined || to === undefined || from > to ? [] : [{ block, from, to }]
+      const span = blockSpan(block, units)
+      return span ? [span] : []
     })
     .sort((a, b) => a.from - b.from)
-}
 
-/** Units that must stay visible: the latest user message. Work after it in the current turn can be archived. */
+/** Protect the latest user message if identifiable; unidentified units always stay visible. */
 export const protectedIndexes = (units: readonly Unit[]): number[] => {
   const user = units.findLastIndex((unit) => unit.role === "user")
-  return user === -1 ? [] : [user]
+  return user === -1 || !units[user]!.key ? [] : [user]
 }
 
 export interface RangeInput {
@@ -72,6 +77,21 @@ interface ArchiveResult {
   readonly messages: number
 }
 
+/** Retain missing child members in their captured order while weaving in newly archived units. */
+const capturedKeys = (units: readonly Unit[], children: readonly Block[]): string[] => {
+  const cursors = new Map<string, number>()
+  const last = new Map(children.map((child) => [child.id, units.findLastIndex((unit) => child.unitKeys.includes(unit.key!))]))
+  return units.flatMap((unit, index) => {
+    if (!unit.key) return []
+    const child = children.find((child) => child.unitKeys.includes(unit.key!))
+    if (!child) return [unit.key!]
+    const from = cursors.get(child.id) ?? 0
+    const to = Math.max(from, index === last.get(child.id) ? child.unitKeys.length : child.unitKeys.indexOf(unit.key!) + 1)
+    cursors.set(child.id, to)
+    return child.unitKeys.slice(from, to)
+  })
+}
+
 export const archive = (
   state: SessionState,
   units: readonly Unit[],
@@ -80,7 +100,7 @@ export const archive = (
 ): ArchiveResult[] => {
   if (!ranges.length) throw new ArchiveError("Provide at least one range.")
   const refs = refsOf(state, units)
-  const index = new Map(refs.map((ref, i) => [normalizeRef(ref), i]))
+  const index = new Map(refs.flatMap((ref, i) => ref ? [[normalizeRef(ref), i] as const] : []))
   const spans = activeSpans(state, units)
   const guarded = protectedIndexes(units)
 
@@ -95,8 +115,8 @@ export const archive = (
       throw new ArchiveError(`Range ${range.start}–${range.end} includes ${refs[hit]}, the latest user message, which must stay visible.`)
     }
     for (const span of spans) {
-      const overlaps = span.from <= to && span.to >= from
-      const contains = from <= span.from && span.to <= to
+      const overlaps = span.indexes.some((index) => from <= index && index <= to)
+      const contains = span.indexes.every((index) => from <= index && index <= to)
       if (overlaps && !contains) {
         throw new ArchiveError(
           `Range ${range.start}–${range.end} partially overlaps block ${span.block.id} (${span.block.start}–${span.block.end}). Widen the range to include the whole block, or start/end at ${span.block.id}.`,
@@ -129,21 +149,24 @@ export const archive = (
   }
 
   return resolved.map(({ range, from, to }) => {
-    const children = spans.filter((span) => from <= span.from && span.to <= to).map((span) => span.block)
+    const selected = units.slice(from, to + 1)
+    const identifiable = selected.filter((unit) => unit.key)
+    const children = spans.filter((span) => span.indexes.every((index) => from <= index && index <= to)).map((span) => span.block)
     const id = `b${state.nextBlock++}`
     const block: Block = {
       id,
       start: refs[from]!,
       end: refs[to]!,
+      unitKeys: capturedKeys(selected, children),
       summary: range.summary.trim(),
       topic: range.topic?.trim() || undefined,
-      tokens: units.slice(from, to + 1).reduce((sum, unit) => sum + unit.tokens, 0),
+      tokens: identifiable.reduce((sum, unit) => sum + unit.tokens, 0),
       createdAt: now,
       children: children.map((child) => child.id),
     }
     for (const child of children) child.parent = id
     state.blocks[id] = block
-    return { block, from, to, messages: to - from + 1 }
+    return { block, from, to, messages: identifiable.length }
   })
 }
 

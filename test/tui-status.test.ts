@@ -14,7 +14,7 @@ const stats = (status: ArchiveJobStatus["status"] = "running", sessionID = "s1")
 
 test("footer snapshots and events use the session location", async () => {
   const location = { directory: "/workspace/lacuna", workspaceID: "w1" }
-  const current: Stats = { sessionID: "s1", archived: 300_000 }
+  const current: Stats = { sessionID: "s1", archived: 300_000, unresolved: ["b1"] }
   let event!: (value: { location: typeof location; data: Stats }) => void
   const { feed, dispose } = connectStatusFeed({
     stats: async (_input, options) => {
@@ -26,6 +26,7 @@ test("footer snapshots and events use the session location", async () => {
   try {
     await feed.fetch("s1")
     assert.equal(feed.get("s1")!.archived, current.archived)
+    assert.deepEqual(feed.get("s1")!.unresolved, ["b1"])
     for (const other of [
       { directory: "/workspace", workspaceID: "w1" },
       { directory: location.directory, workspaceID: "w2" },
@@ -33,8 +34,9 @@ test("footer snapshots and events use the session location", async () => {
       event({ location: other, data: { sessionID: "s1", archived: 0 } })
       assert.equal(feed.get("s1")!.archived, current.archived)
     }
-    event({ location, data: { sessionID: "s1", archived: 0 } })
+    event({ location, data: { sessionID: "s1", archived: 0, unresolved: [] } })
     assert.equal(feed.get("s1")!.archived, 0)
+    assert.deepEqual(feed.get("s1")!.unresolved, [])
   } finally {
     dispose()
   }

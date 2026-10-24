@@ -37,6 +37,8 @@ interface ContextProjection {
   readonly messages: Msg[]
   readonly tokens: number
   readonly originalTokens: number
+  /** Top-level blocks with no surviving members in this transcript. */
+  readonly unresolved: readonly string[]
 }
 
 const prependText = (message: Msg, text: string): Part[] => [{ type: "text", text }, ...message.content]
@@ -79,7 +81,10 @@ const tagUnitResults = (unit: Unit, tag: string, make: MakeMessage): Msg[] | und
 
 export const projectContext = (state: SessionState, units: readonly Unit[], make: MakeMessage = (message) => message): ContextProjection => {
   const refs = refsOf(state, units)
-  const spans = new Map(activeSpans(state, units).map((span) => [span.from, span]))
+  const active = activeSpans(state, units)
+  const resolved = new Set(active.map((span) => span.block.id))
+  const unresolved = Object.values(state.blocks).filter((block) => !block.parent && !resolved.has(block.id)).map((block) => block.id)
+  const spans = new Map(active.flatMap((span) => span.indexes.map((index) => [index, span] as const)))
   const messages: Msg[] = []
   let tokens = 0
   let originalTokens = 0
@@ -94,36 +99,41 @@ export const projectContext = (state: SessionState, units: readonly Unit[], make
   for (let i = 0; i < units.length; i++) {
     const span = spans.get(i)
     if (span) {
-      const text = takePending() + blockText(span.block)
-      messages.push(make({ role: "user", content: [{ type: "text", text }] }))
-      tokens += Math.ceil(text.length / 4)
-      for (const unit of units.slice(span.from, span.to + 1)) {
-        originalTokens += unit.tokens
-        // Mid-conversation system messages carry host state (e.g. reasoning effort changes), so they survive archiving.
-        if (unit.role === "system") messages.push(...unit.messages)
+      if (i === span.from) {
+        const text = takePending() + blockText(span.block)
+        messages.push(make({ role: "user", content: [{ type: "text", text }] }))
+        tokens += Math.ceil(text.length / 4)
       }
-      i = span.to
+      const unit = units[i]!
+      originalTokens += unit.tokens
+      // Mid-conversation system messages carry host state, so they survive archiving.
+      if (unit.role === "system") {
+        messages.push(...unit.messages)
+        tokens += unit.tokens
+      }
       continue
     }
 
     const unit = units[i]!
-    const tag = refTag(refs[i]!, unit)
+    const ref = refs[i]
+    const tag = ref ? refTag(ref, unit) : ""
     originalTokens += unit.tokens
     tokens += unit.tokens
     if (unit.role === "system") messages.push(...unit.messages)
     else if (unit.role === "user") {
+      const prefix = takePending() + tag
       unit.messages.forEach((message, index) =>
-        messages.push(index === 0 ? make({ ...message, content: prependText(message, takePending() + tag) }) : message),
+        messages.push(index === 0 && prefix ? make({ ...message, content: prependText(message, prefix) }) : message),
       )
     } else {
-      const tagged = tagUnitResults(unit, tag, make)
+      const tagged = ref ? tagUnitResults(unit, tag, make) : undefined
       if (tagged) messages.push(...tagged)
       else {
         messages.push(...unit.messages)
-        pending.push(tag)
+        if (ref) pending.push(tag)
       }
     }
   }
 
-  return { messages, tokens, originalTokens }
+  return { messages, tokens, originalTokens, unresolved }
 }

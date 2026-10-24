@@ -16,8 +16,9 @@ export const candidates = (state: SessionState, units: readonly Unit[], limit = 
   const refs = refsOf(state, units)
   const spans = activeSpans(state, units)
   const barriers = [
-    ...spans.map((span) => ({ from: span.from, to: span.to })),
+    ...spans.flatMap((span) => span.indexes.map((index) => ({ from: index, to: index }))),
     ...protectedIndexes(units).map((index) => ({ from: index, to: index })),
+    ...units.flatMap((unit, index) => unit.key ? [] : [{ from: index, to: index }]),
   ].sort((a, b) => a.from - b.from)
   const runs: (Omit<Candidate, "prefixPreserved"> & { from: number })[] = []
   let from = 0

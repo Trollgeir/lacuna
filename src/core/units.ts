@@ -42,11 +42,11 @@ const partTokens = (part: Part) => (part.type === "media" ? MEDIA_TOKENS : estim
 
 const messageTokens = (message: Msg) => message.content.reduce((sum, part) => sum + partTokens(part), 4)
 
-const unitKey = (message: Msg, index: number) => {
+const unitKey = (message: Msg) => {
   if (message.id) return message.id
   const result = message.content.find((part) => part.type === "tool-result")
   if (result && typeof result.id === "string") return `tool:${result.id}`
-  return `anon:${index}`
+  return undefined
 }
 
 const labelFor = (role: Unit["role"], messages: readonly Msg[]) => {
@@ -62,7 +62,7 @@ const labelFor = (role: Unit["role"], messages: readonly Msg[]) => {
   return tools.length ? `tools:${tools.join(",")}` : "assistant"
 }
 
-const makeUnit = (key: string, role: Unit["role"], messages: Msg[]): Unit => ({
+const makeUnit = (key: string | undefined, role: Unit["role"], messages: Msg[]): Unit => ({
   key,
   role,
   messages,
@@ -76,15 +76,15 @@ const makeUnit = (key: string, role: Unit["role"], messages: Msg[]): Unit => ({
 })
 
 export const groupUnits = (messages: readonly Msg[]): Unit[] => {
-  const groups: { key: string; role: Unit["role"]; messages: Msg[] }[] = []
-  messages.forEach((message, index) => {
+  const groups: { key?: string; role: Unit["role"]; messages: Msg[] }[] = []
+  messages.forEach((message) => {
     const last = groups.at(-1)
     if (message.role === "tool" && last?.role === "assistant") {
       last.messages.push(message)
       return
     }
     const role = message.role === "tool" ? "user" : message.role
-    groups.push({ key: unitKey(message, index), role, messages: [message] })
+    groups.push({ key: unitKey(message), role, messages: [message] })
   })
   return groups.map((group) => makeUnit(group.key, group.role, group.messages))
 }
