@@ -4,10 +4,10 @@
   "description": "OpenCode plugin that lets the model archive parts of its own context and restore them later.",
   "type": "module",
   "license": "MIT",
-  "main": "./src/plugin.ts",
+  "main": "./index.ts",
   "exports": {
-    ".": "./src/plugin.ts",
-    "./tui": "./src/tui.tsx"
+    ".": "./index.ts",
+    "./tui": "./tui.ts"
   },
   "files": [
     "LICENSE",
@@ -21,7 +21,9 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@opencode/plugin": "^2.1.4"
+    "@opencode/ai": "^2.1.4",
+    "@opencode/plugin": "^2.1.4",
+    "effect": "^4.0.1"
   },
   "peerDependencies": {
     "@opentui/core": ">=0.6.8",
@@ -45,6 +47,7 @@
     "opencode",
     "opencode-plugin",
     "context",
+    "compression",
     "llm"
   ]
 }

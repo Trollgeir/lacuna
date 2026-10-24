@@ -1,22 +1,24 @@
 import { Rpc } from "@opencode/plugin/rpc"
+import { Schema } from "effect"
+import { archiveJobStatus } from "./core/archive/status.ts"
 
-export interface Stats {
-  readonly sessionID: string
+const stats = Schema.Struct({
+  sessionID: Schema.String,
   /** Estimated tokens currently removed from the context by archiving. */
-  readonly archived: number
+  archived: Schema.Finite,
+  /** Summaries await application, or context changes await a completed primary response. */
+  changed: Schema.optionalKey(Schema.Boolean),
+  job: Schema.optionalKey(archiveJobStatus),
+})
+
+export type Stats = typeof stats.Type
+
+const statsJsonSchema = {
+  ...Schema.toJsonSchemaDocument(stats, { onExcessProperty: "error" }).schema,
+  type: "object" as const,
 }
 
-const stats = {
-  type: "object",
-  properties: {
-    sessionID: { type: "string" },
-    archived: { type: "number" },
-  },
-  required: ["sessionID", "archived"],
-  additionalProperties: false,
-} as const
-
-/** Contract between the server plugin and the terminal footer. */
+/** Contract between the server plugin and the terminal's context/job status. */
 export const Lacuna = Rpc.define({
   id: "lacuna",
   methods: {
@@ -29,12 +31,12 @@ export const Lacuna = Rpc.define({
       },
       output: {
         type: "object",
-        properties: { stats: stats },
+        properties: { stats: statsJsonSchema },
         additionalProperties: false,
       },
     },
   },
   events: {
-    stats: { schema: stats },
+    stats: { schema: statsJsonSchema },
   },
 })

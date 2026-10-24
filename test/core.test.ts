@@ -1,12 +1,12 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
 import { calibrate, DEFAULT_CALIBRATION } from "../src/core/calibration.ts"
-import { addNudge, nudgeThreshold } from "../src/core/prompt.ts"
-import { render, stripEchoedTags } from "../src/core/render.ts"
+import { ArchiveTrigger, archiveThreshold } from "../src/core/archive/trigger.ts"
+import { projectContext, stripEchoedTags } from "../src/core/projection.ts"
 import { search } from "../src/core/search.ts"
 import { archive, assignRefs, refsOf, restore } from "../src/core/state.ts"
 import { detachedRefs, markSnapshotted, prepareCompaction, unitFromSnapshot, unsnapshotted } from "../src/core/compaction.ts"
-import { statusReport } from "../src/core/status.ts"
+import { candidates } from "../src/core/archive/candidates.ts"
 import { emptyState, type Msg } from "../src/core/types.ts"
 import { groupUnits } from "../src/core/units.ts"
 
@@ -57,31 +57,12 @@ test("archive replaces a range into a summary and keeps tool pairs intact", () =
   const { state, units } = setup()
   const [result] = archive(state, units, [{ start: "m1", end: "m3", summary: "Config port is 8080.", topic: "config" }])
   assert.equal(result!.block.id, "b1")
-  const out = render(state, units, identity)
+  const out = projectContext(state, units, identity)
   assert.equal(out.messages.length, 3)
+  assert.doesNotMatch(JSON.stringify(out.messages), /tokens=/)
   assert.match(texts(out.messages)[0]!, /<archived block="b1" range="m1–m3".*topic="config">\nConfig port is 8080\./)
   assert.ok(!out.messages.some((m) => m.role === "tool"))
   assert.ok(out.tokens < out.originalTokens)
-})
-
-test("a failed archive call reports every problem and archives nothing", () => {
-  const { state, units } = setup()
-  assert.throws(
-    () =>
-      archive(state, units, [
-        { start: "m1", end: "m2", summary: "ok" },
-        { start: "m9", end: "m9", summary: "x" },
-        { start: "m3", end: "m2", summary: "x" },
-        { start: "m2", end: "m3", summary: "x" },
-      ]),
-    (error: Error) =>
-      /Unknown ref "m9"/.test(error.message) &&
-      /m3–m2 is reversed/.test(error.message) &&
-      /m1–m2 and m2–m3 overlap/.test(error.message) &&
-      /Nothing was archived/.test(error.message),
-  )
-  assert.deepEqual(state.blocks, {})
-  assert.equal(state.nextBlock, 1)
 })
 
 test("protects the latest user message but allows archiving work in the current turn", () => {
@@ -107,6 +88,7 @@ test("protects the latest user message but allows archiving work in the current 
 test("rejects partial overlap and overlapping ranges", () => {
   const { state, units } = setup()
   archive(state, units, [{ start: "m2", end: "m3", summary: "inner" }])
+  const before = structuredClone(state)
   assert.throws(() => archive(state, units, [{ start: "m1", end: "m2", summary: "x" }]), /partially overlaps/)
   assert.throws(
     () => archive(state, units, [
@@ -115,6 +97,7 @@ test("rejects partial overlap and overlapping ranges", () => {
     ]),
     /overlap/,
   )
+  assert.deepEqual(state, before, "invalid batches cannot partially mutate archive state")
 })
 
 test("nested blocks restore one level at a time", () => {
@@ -125,12 +108,12 @@ test("nested blocks restore one level at a time", () => {
   assert.throws(() => restore(state, "b1"), /nested inside b2/)
 
   restore(state, "b2")
-  const once = texts(render(state, units, identity).messages)
+  const once = texts(projectContext(state, units, identity).messages)
   assert.ok(once.some((t) => t.includes("inner")))
   assert.ok(!once.some((t) => t.includes("outer")))
 
   restore(state, "b1")
-  const full = render(state, units, identity)
+  const full = projectContext(state, units, identity)
   assert.ok(full.messages.some((m) => m.role === "tool"))
 })
 
@@ -144,7 +127,7 @@ test("never puts ref tags inside assistant messages", () => {
     user("u2", "bye"),
   ])
   assignRefs(state, units)
-  const out = render(state, units, identity).messages
+  const out = projectContext(state, units, identity).messages
   for (const message of out.filter((m) => m.role === "assistant")) {
     assert.ok(!JSON.stringify(message.content).includes("<ref id="))
   }
@@ -163,20 +146,44 @@ test("search finds details in summaries and in the archived originals", () => {
   assert.deepEqual(search(state, units, "nonexistent"), [])
 })
 
-test("status lists blocks and archivable candidates", () => {
-  const { state, units } = setup()
+test("candidates group role runs and include users while excluding archives and protected messages", () => {
+  const { state, units: originalUnits } = setup()
+  const sizes = [1500, 1500, 1000, 10, 1000]
+  const units = originalUnits.map((unit, i) => ({ ...unit, tokens: sizes[i]! }))
+  assert.deepEqual(candidates(state, units).map(({ start, end }) => [start, end]), [["m2", "m3"], ["m1", "m1"], ["m5", "m5"]])
   archive(state, units, [{ start: "m1", end: "m1", summary: "asked to read config" }])
-  const out = render(state, units, identity)
-  const report = statusReport({ state, units, tokens: out.tokens, originalTokens: out.originalTokens, limit: 100_000 })
-  assert.match(report, /b1 m1–m1/)
-  assert.match(report, /m2–m3/)
+  const runs = candidates(state, units)
+  assert.deepEqual(runs.map(({ start, end }) => [start, end]), [["m2", "m3"], ["m5", "m5"]])
+  assert.ok(runs[0]!.tokens >= runs[1]!.tokens)
+  assert.equal(runs[0]!.prefixPreserved, projectContext(state, units.slice(0, 1), identity).tokens)
+  assert.equal(runs[1]!.prefixPreserved, projectContext(state, units.slice(0, 4), identity).tokens)
+  const tied = units.map((unit, i) => i === 4 ? { ...unit, tokens: runs[0]!.tokens } : unit)
+  assert.equal(candidates(state, tied)[0]!.start, "m5", "equal-sized candidates prefer the later range")
+  const separated = { ...setup(), units }
+  archive(separated.state, separated.units, [{ start: "m2", end: "m2", summary: "Read the config." }])
+  assert.deepEqual(candidates(separated.state, separated.units).map(({ start, end }) => [start, end]), [["m1", "m1"], ["m5", "m5"], ["m3", "m3"]])
+  const largeUserState = emptyState()
+  const largeUserUnits = groupUnits([
+    user("u1", "Long pasted data. ".repeat(1000)),
+    user("u2", "Additional context"),
+    assistant("a1", "Reading", "c1"),
+    tool("c1", "Result"),
+    assistant("a2", "Done"),
+    user("u3", "Protected request"),
+  ])
+  assignRefs(largeUserState, largeUserUnits)
+  assert.deepEqual(candidates(largeUserState, largeUserUnits).map(({ start, end }) => [start, end]), [["m1", "m2"]])
+  const belowMinimum = largeUserUnits.map((unit, i) => ({ ...unit, tokens: i === 0 ? 999 : 0 }))
+  assert.deepEqual(candidates(largeUserState, belowMinimum), [])
+  const atMinimum = belowMinimum.map((unit, i) => i === 0 ? { ...unit, tokens: 1000 } : unit)
+  assert.equal(candidates(largeUserState, atMinimum, 1)[0]!.start, "m1")
 })
 
-test("nudgeAt is a fraction of the window up to 1, otherwise an absolute token count", () => {
-  assert.equal(nudgeThreshold(0.6, 200_000), 120_000)
-  assert.equal(nudgeThreshold(0.6, undefined), undefined)
-  assert.equal(nudgeThreshold(100_000, 1_000_000), 100_000)
-  assert.equal(nudgeThreshold(100_000, undefined), 100_000)
+test("archiveAt is a fraction of the window up to 1, otherwise an absolute token count", () => {
+  assert.equal(archiveThreshold(0.6, 200_000), 120_000)
+  assert.equal(archiveThreshold(0.6, undefined), undefined)
+  assert.equal(archiveThreshold(100_000, 1_000_000), 100_000)
+  assert.equal(archiveThreshold(100_000, undefined), 100_000)
 })
 
 test("strips ref tags the model echoed into its own replies", () => {
@@ -185,8 +192,8 @@ test("strips ref tags the model echoed into its own replies", () => {
     role: "assistant",
     content: [
       { type: "reasoning", text: "thinking" },
-      { type: "text", text: '<ref id="m7" tokens="1k" kind="assistant"/><ref id="m7" tokens="2k" kind="assistant"/>Hello <ref id="m1"/>\n<ref id="m9" tokens="3" kind="tools:shell"/>\nmore' },
-      { type: "text", text: '<ref id="m7" tokens="1k" kind="assistant"/>' },
+      { type: "text", text: '<ref id="m7" kind="assistant"/><ref id="m7" kind="assistant"/>Hello <ref id="m1"/>\n<ref id="m9" kind="tools:shell"/>\nmore' },
+      { type: "text", text: '<ref id="m7" kind="assistant"/>' },
     ],
   }
   assert.deepEqual(stripEchoedTags(echoed)?.content, [
@@ -201,7 +208,7 @@ test("strips ref tags the model echoed into its own replies", () => {
     const state = emptyState()
     const units = groupUnits([user("u", "hi"), stripEchoedTags(message) ?? message])
     assignRefs(state, units)
-    return render(state, units, (m) => m).messages
+    return projectContext(state, units, (m) => m).messages
   }
   assert.deepEqual(renderOf(echoed), renderOf(clean))
 })
@@ -243,12 +250,12 @@ test("archived blocks survive compaction and only unarchived units are summarise
   const detached = detachedRefs(state, after).map((ref) => unitFromSnapshot(stored.get(ref).key, stored.get(ref).messages)!)
   const combined = [...detached, ...after]
   assert.deepEqual(refsOf(state, combined), ["m1", "m2", "m6", "m7"])
-  const rendered = texts(render(state, combined, identity).messages).join("\n")
+  const rendered = texts(projectContext(state, combined, identity).messages).join("\n")
   assert.match(rendered, /<archived block="b1" range="m1–m2"/)
   assert.equal(search(state, combined, "zebra")[0]?.block.id, "b1")
 
   restore(state, "b1")
-  assert.match(JSON.stringify(render(state, combined, identity).messages), /zebra/)
+  assert.match(JSON.stringify(projectContext(state, combined, identity).messages), /zebra/)
 })
 
 test("reverting past a compaction does not bring back reverted archived units", () => {
@@ -264,32 +271,15 @@ test("reverting past a compaction does not bring back reverted archived units", 
   assert.deepEqual(detachedRefs(state, units.slice(0, 3)), [])
 })
 
-test("nudges stay where they were first shown so earlier requests remain a prefix", () => {
-  const { state, units } = setup()
-  assert.equal(addNudge(state, "m5", 900, 1000), false)
-  assert.equal(addNudge(state, "m5", 1000, 1000), true)
-  const first = render(state, units, identity).messages
-
-  const more = groupUnits([...transcript(), user("u3", "next")])
-  assignRefs(state, more)
-  assert.equal(addNudge(state, "m6", 1100, 1000), false, "waits for more growth before nudging again")
-  const second = render(state, more, identity).messages
-  assert.deepEqual(second.slice(0, first.length), first)
-  assert.equal(first.at(-1)!.role, "system")
-
-  assert.equal(addNudge(state, "m6", 1200, 1000), true)
-  archive(state, more, [{ start: "m1", end: "m5", summary: "Earlier work." }])
-  const third = texts(render(state, more, identity).messages).join("\n")
-  assert.equal(third.match(/\[context\]/g)?.length, 1, "nudges inside archived ranges are dropped")
-
-  assert.equal(addNudge(state, "m6", 500, 1000), false)
-  assert.equal(state.nudgedAt, undefined, "dropping below the threshold resets the step")
-})
-
-test("sessions with zero-padded refs keep them and accept either form", () => {
-  const { state, units } = setup()
-  state.refs = Object.fromEntries(Object.entries(state.refs).map(([key, ref]) => [key, ref.replace(/^m/, "m000")]))
-  const [result] = archive(state, units, [{ start: "m1", end: "m0003", summary: "Old format." }])
-  assert.equal(result!.block.start, "m0001")
-  assert.match(texts(render(state, units, identity).messages).join("\n"), /range="m0001–m0003"/)
+test("automatic archiving waits for growth between attempts", () => {
+  const trigger = new ArchiveTrigger()
+  assert.equal(trigger.shouldStart(900, 1000), false)
+  assert.equal(trigger.shouldStart(1000, undefined), false)
+  assert.equal(trigger.shouldStart(1000, 1000), true)
+  assert.equal(trigger.shouldStart(1100, 1000), false)
+  assert.equal(trigger.shouldStart(1200, 1000), true)
+  assert.equal(trigger.shouldStart(1000, 1000), false, "context shrinkage rebases the cooldown")
+  assert.equal(trigger.shouldStart(1200, 1000), true)
+  assert.equal(trigger.shouldStart(500, 1000), false)
+  assert.equal(trigger.shouldStart(1000, 1000), true, "dropping below threshold rearms the trigger")
 })

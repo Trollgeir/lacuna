@@ -1,20 +1,17 @@
 import { activeSpans, refsOf } from "./state.ts"
 import type { Block, Msg, Part, SessionState, Unit } from "./types.ts"
 
-const ARCHIVE_TOOL = "archive"
-
-export const formatTokens = (tokens: number) =>
-  tokens >= 1000 ? `${(tokens / 1000).toFixed(tokens >= 10_000 ? 0 : 1)}k` : String(tokens)
-
-const refTag = (ref: string, unit: Unit) => `<ref id="${ref}" tokens="${formatTokens(unit.tokens)}" kind="${unit.label}"/>`
+const refTag = (ref: string, unit: Unit) => `<ref id="${ref}" kind="${unit.label}"/>`
 
 const blockText = (block: Block) => {
   const topic = block.topic ? ` topic="${block.topic.replaceAll('"', "'")}"` : ""
-  return `<archived block="${block.id}" range="${block.start}–${block.end}" tokens="${formatTokens(block.tokens)}"${topic}>\n${block.summary}\n</archived>`
+  // A summary quoting the closing tag would otherwise end the block early.
+  const summary = block.summary.replaceAll("</archived>", "<\\/archived>")
+  return `<archived block="${block.id}" range="${block.start}–${block.end}"${topic}>\n${summary}\n</archived>`
 }
 
 // Full-format ref tags only, so prose that mentions a short `<ref id="…"/>` is left alone.
-const ECHOED_TAG = /[ \t]*<ref id="[^"]*" tokens="[^"]*" kind="[^"]*"\/>[ \t]*\n?/g
+const ECHOED_TAG = /[ \t]*<ref id="[^"]*" kind="[^"]*"\/>[ \t]*\n?/g
 
 /**
  * Models imitate the ref tags they see, and the host stores that text.
@@ -36,7 +33,7 @@ export const stripEchoedTags = (message: Msg): Msg | undefined => {
 /** Message factory, so the adapter can build host-native message objects. */
 export type MakeMessage = (message: Msg) => Msg
 
-interface RenderResult {
+interface ContextProjection {
   readonly messages: Msg[]
   readonly tokens: number
   readonly originalTokens: number
@@ -80,21 +77,7 @@ const tagUnitResults = (unit: Unit, tag: string, make: MakeMessage): Msg[] | und
   return tagged ? messages : undefined
 }
 
-// The summary already lives in the block, so keeping it in the call arguments would pay for it twice.
-const slimArchiveCall = (part: Part): Part => {
-  if (part.type !== "tool-call" || part.name !== ARCHIVE_TOOL) return part
-  const input = part.input as { ranges?: unknown } | undefined
-  if (!input || !Array.isArray(input.ranges)) return part
-  return {
-    ...part,
-    input: {
-      ...input,
-      ranges: input.ranges.map((range: Record<string, unknown>) => ({ ...range, summary: "[Saved as written. Shown in the archived block, not repeated here.]" })),
-    },
-  }
-}
-
-export const render = (state: SessionState, units: readonly Unit[], make: MakeMessage): RenderResult => {
+export const projectContext = (state: SessionState, units: readonly Unit[], make: MakeMessage = (message) => message): ContextProjection => {
   const refs = refsOf(state, units)
   const spans = new Map(activeSpans(state, units).map((span) => [span.from, span]))
   const messages: Msg[] = []
@@ -133,23 +116,12 @@ export const render = (state: SessionState, units: readonly Unit[], make: MakeMe
         messages.push(index === 0 ? make({ ...message, content: prependText(message, takePending() + tag) }) : message),
       )
     } else {
-      const slimmed = unit.messages.map((message) => {
-        if (message.role === "tool") return message
-        const content = message.content.map(slimArchiveCall)
-        return content.some((part, j) => part !== message.content[j]) ? make({ ...message, content }) : message
-      })
-      const tagged = tagUnitResults({ ...unit, messages: slimmed }, tag, make)
+      const tagged = tagUnitResults(unit, tag, make)
       if (tagged) messages.push(...tagged)
       else {
-        messages.push(...slimmed)
+        messages.push(...unit.messages)
         pending.push(tag)
       }
-    }
-
-    const note = state.nudges?.[refs[i]!]
-    if (note) {
-      messages.push(make({ role: "system", content: [{ type: "text", text: note }] }))
-      tokens += Math.ceil(note.length / 4)
     }
   }
 

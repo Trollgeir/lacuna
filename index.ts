@@ -1,1 +1,1 @@
-export { default } from "./src/plugin.ts"
+export { default } from "./src/server/plugin.ts"

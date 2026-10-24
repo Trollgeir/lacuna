@@ -51,10 +51,6 @@ export interface SessionState {
   snapshots?: Record<string, true>
   /** Highest ref number a compaction has summarised; stored units up to it are no longer sent by the host. */
   compactedThrough?: number
-  /** Nudge text by the ref it follows. Nudges stay where they were first shown, so the prompt prefix stays cacheable. */
-  nudges?: Record<string, string>
-  /** Context size at the latest nudge; cleared once the context drops below the threshold. */
-  nudgedAt?: number
 }
 
 export const emptyState = (): SessionState => ({
