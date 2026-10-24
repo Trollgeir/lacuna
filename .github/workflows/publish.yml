@@ -24,8 +24,57 @@ jobs:
       - run: npm run typecheck
       - run: npm test
 
-      # The version comes from the release tag (v1.2.3 -> 1.2.3); package.json keeps 0.0.0.
+      # Temporary workaround for npm-installed TUI plugins losing Solid reactivity.
+      # Before removing it, check the upstream issue and loader-fix PR:
+      # https://github.com/anomalyco/opencode/issues/39986
+      # https://github.com/anomalyco/opentui/pull/1741
+      # Confirm the fix is integrated into OpenCode and npm-installed raw TSX updates correctly.
+      # Remove staging and publish raw TSX again after the upstream loader fix ships.
+      - name: Compile and stage TUI package
+        id: package
+        run: |
+          node --input-type=module <<'NODE'
+          import { appendFile, cp, mkdtemp, readFile, writeFile } from "node:fs/promises"
+          import path from "node:path"
+          import { pathToFileURL } from "node:url"
+          import { createRequire } from "node:module"
+
+          const root = process.cwd()
+          const require = createRequire(path.join(root, "package.json"))
+          // Reuse the installed OpenTUI compiler without bundling runtime dependencies.
+          // This internal compiler path is only needed for the temporary workaround.
+          const solidRoot = path.dirname(require.resolve("@opentui/solid"))
+          const { transformSolidSource } = await import(pathToFileURL(path.join(solidRoot, "scripts/solid-transform.js")).href)
+          const manifest = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"))
+          const staging = await mkdtemp(path.join(process.env.RUNNER_TEMP, "lacuna-package-"))
+
+          for (const file of manifest.files) {
+            await cp(path.join(root, file), path.join(staging, file), {
+              recursive: true,
+              filter: source => !source.endsWith(".tsx"),
+            })
+          }
+
+          const filename = path.join(root, "src/tui/plugin.tsx")
+          const compiled = await transformSolidSource(await readFile(filename, "utf8"), {
+            filename,
+            moduleName: "@opentui/solid",
+          })
+          // Explicit Solid/OpenTUI imports are bridged to OpenCode's shared runtime.
+          if (compiled.includes("/jsx-runtime") || compiled.includes("/jsx-dev-runtime")) {
+            throw new Error("Unexpected automatic JSX runtime import in compiled TUI")
+          }
+          await writeFile(path.join(staging, "src/tui/plugin.js"), compiled + "\n")
+          await writeFile(path.join(staging, "tui.ts"), 'export { default } from "./src/tui/plugin.js"\n')
+          await writeFile(path.join(staging, "package.json"), JSON.stringify(manifest, null, 2) + "\n")
+          await appendFile(process.env.GITHUB_OUTPUT, `directory=${staging}\n`)
+          NODE
+
+      # Only the staged manifest is versioned; checked-in package.json keeps 0.0.0.
       - name: Set version from release tag
+        working-directory: ${{ steps.package.outputs.directory }}
         run: npm version "${GITHUB_REF_NAME#v}" --no-git-tag-version
 
-      - run: npm publish
+      - name: Publish staged package
+        working-directory: ${{ steps.package.outputs.directory }}
+        run: npm publish --ignore-scripts
