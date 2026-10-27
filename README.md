@@ -6,6 +6,8 @@ Most context management runs on fixed rules: drop old tool output, summarise whe
 those decisions to a background archive agent forked from the main agent. It sees the current context, chooses what to summarise or keep,
 and leaves the main agent free to continue working. The main agent can bring the originals back when needed.
 
+![How Lacuna archives context](docs/animation/lacuna.webp)
+
 ## How it works
 
 1. Identifiable conversation units carry ref tags with their ID and kind:

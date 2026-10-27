@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Lacuna animation draft</title>
+<style>
+  body { margin: 0; background: #010409; color: #c9d1d9; font: 13px system-ui, sans-serif; display: grid; place-items: center; min-height: 100vh; }
+  #stage { width: 800px; height: 540px; }
+</style>
+</head>
+<body>
+<div>
+  <svg id="stage" viewBox="0 0 800 540" xmlns="http://www.w3.org/2000/svg"></svg>
+</div>
+<script>
+const W = 800, H = 540, T = 14;
+const DOC_W = 250, CENTER_X = 275, LEFT_X = 95, RIGHT_X = 455, DOC_TOP = 92, PAD = 6, GAP = 4;
+const SUMMARY_H = 22;
+const RANGE = [1, 4]; // inclusive block indices that get archived
+
+const COLORS = {
+  bg: '#0d1117', paper: '#161b22', paperStroke: '#30363d', text: '#c9d1d9', muted: '#8b949e',
+  user: '#388bfd', asst: '#a371f7', tool: '#d29922', sys: '#8b949e', summary: '#3fb950',
+  threshold: '#f85149', scan: '#a371f7',
+};
+
+const BLOCKS = [
+  { k: 'user', l: 'user', h: 18 },
+  { k: 'asst', l: 'assistant', h: 24 },
+  { k: 'tool', l: 'tool · read', h: 72 },
+  { k: 'asst', l: 'assistant', h: 22 },
+  { k: 'tool', l: 'tool · grep', h: 38 },
+  { k: 'user', l: 'user', h: 18 },
+  { k: 'asst', l: 'assistant', h: 26 },
+  { k: 'tool', l: 'tool · bash', h: 28 },
+  // turns added by the main agent after the fork
+  { k: 'asst', l: 'assistant', h: 24 },
+  { k: 'user', l: 'user', h: 18 },
+  { k: 'tool', l: 'tool · edit', h: 30 },
+];
+const FORKED = 8;
+const APPEAR = [0.2, 0.7, 1.2, 1.7, 2.2, 2.7, 3.2, 3.7, 6.3, 7.3, 8.3];
+const APPEAR_DUR = 0.4;
+const INSTRUCTIONS = { k: 'sys', l: 'archive instructions', h: 24, dashed: true };
+
+// Threshold sits halfway through the last pre-fork block, so that block crosses it.
+const THRESHOLD = (() => {
+  let y = PAD;
+  for (let i = 0; i < FORKED - 1; i++) y += BLOCKS[i].h + GAP;
+  return y + BLOCKS[FORKED - 1].h / 2;
+})();
+const ARCHIVE_AT = 200;
+
+const clamp = (v, a = 0, b = 1) => Math.min(b, Math.max(a, v));
+const ease = x => x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2;
+const prog = (t, a, b) => ease(clamp((t - a) / (b - a)));
+const lerp = (a, b, p) => a + (b - a) * p;
+
+// Pseudo-random but stable widths for the faux text lines.
+const barWidths = i => [0.82, 0.64, 0.9, 0.55, 0.74, 0.86, 0.6, 0.7].map((w, j) => (w + ((i * 7 + j * 3) % 5) * 0.03) % 1 || 0.5);
+
+function layout(blocks, collapse) {
+  // blocks: [{...block, p}] where p is appear progress
+  // collapse: { from, to, c } shrinks blocks[from..to] into one summary block
+  const items = [];
+  let y = PAD;
+  let i = 0;
+  while (i < blocks.length) {
+    const b = blocks[i];
+    if (b.p <= 0) { i++; continue; }
+    if (collapse && i === collapse.from) {
+      let full = 0;
+      for (let j = collapse.from; j <= collapse.to; j++) full += blocks[j].h + (j < collapse.to ? GAP : 0);
+      const cur = lerp(full, SUMMARY_H, collapse.c);
+      const s = cur / full;
+      let off = 0;
+      for (let j = collapse.from; j <= collapse.to; j++) {
+        const bj = blocks[j];
+        items.push({ ...bj, idx: j, y: y + off * s, h: bj.h * s, o: 1 - collapse.c, squash: s });
+        off += bj.h + GAP;
+      }
+      items.push({ k: 'summary', l: 'b1 · summary', y, h: cur, o: collapse.c, summary: true, idx: 'sum' });
+      items.rangeTop = y;
+      items.rangeH = cur;
+      y += cur + GAP;
+      i = collapse.to + 1;
+      continue;
+    }
+    const h = b.h * b.p;
+    items.push({ ...b, idx: i, y, h, o: b.p });
+    if (i === collapse?.from) items.rangeTop = y;
+    y += h + GAP * b.p;
+    i++;
+  }
+  return { items, height: y - GAP + PAD };
+}
+
+function rangeBounds(blocks, from, to) {
+  let y = PAD;
+  for (let i = 0; i < from; i++) y += blocks[i].h + GAP;
+  let h = 0;
+  for (let i = from; i <= to; i++) h += blocks[i].h + (i < to ? GAP : 0);
+  return { y, h };
+}
+
+function blockSvg(b, x, top) {
+  if (b.h < 0.5 || b.o <= 0.01) return '';
+  const color = COLORS[b.k];
+  const y = top + b.y;
+  const w = DOC_W - PAD * 2 - 14;
+  const bx = x + PAD + 14;
+  let s = `<g opacity="${b.o.toFixed(3)}">`;
+  s += `<rect x="${bx}" y="${y}" width="${w}" height="${b.h}" rx="4" fill="${color}" fill-opacity="${b.summary ? 0.2 : 0.13}" stroke="${color}" stroke-opacity="0.8" ${b.dashed || b.summary ? 'stroke-dasharray="3 3"' : ''}/>`;
+  const textO = b.squash !== undefined ? clamp((b.squash - 0.6) / 0.3) : clamp((b.h - 12) / 6);
+  if (textO > 0) {
+    s += `<text x="${bx + 7}" y="${y + 12}" fill="${color}" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="9.5" opacity="${textO}">${b.l}</text>`;
+    const widths = barWidths(typeof b.idx === 'number' ? b.idx : 3);
+    let ly = y + 19;
+    let n = 0;
+    while (ly + 3 <= y + b.h - 4 && n < widths.length) {
+      s += `<rect x="${bx + 7}" y="${ly}" width="${(w - 14) * widths[n]}" height="3" rx="1.5" fill="${color}" opacity="${0.3 * textO}"/>`;
+      ly += 7; n++;
+    }
+  }
+  return s + '</g>';
+}
+
+function docSvg({ x, title, sub, subColor, items, height, opacity = 1, headO = 1, lineColor = COLORS.muted, tip = true }) {
+  let s = `<g opacity="${opacity.toFixed(3)}">`;
+  s += `<g opacity="${headO}"><text x="${x}" y="${DOC_TOP - 14}" fill="${COLORS.text}" font-size="14" font-weight="600">${title}</text>`;
+  if (sub) s += `<text x="${x + DOC_W}" y="${DOC_TOP - 14}" fill="${subColor || COLORS.muted}" font-size="12" text-anchor="end" font-family="ui-monospace, monospace">${sub}</text>`;
+  s += `</g>`;
+  const ph = Math.max(height, 20);
+  s += `<rect x="${x}" y="${DOC_TOP}" width="${DOC_W}" height="${ph}" rx="8" fill="${COLORS.paper}" stroke="${COLORS.paperStroke}"/>`;
+  // write head: a vertical line that produces the document as turns arrive
+  const lx = x + PAD + 6;
+  const end = DOC_TOP + Math.max(height - PAD, PAD);
+  s += `<line x1="${lx}" y1="${DOC_TOP + PAD}" x2="${lx}" y2="${end}" stroke="${lineColor}" stroke-width="2" stroke-linecap="round"/>`;
+  for (const b of items) {
+    if (b.o > 0.05 && b.h > 2) s += `<circle cx="${lx}" cy="${DOC_TOP + b.y + Math.min(6, b.h / 2)}" r="2.5" fill="${COLORS[b.k]}" opacity="${b.o}"/>`;
+  }
+  if (tip) s += `<circle cx="${lx}" cy="${end}" r="4.5" fill="${lineColor}"><animate attributeName="r" values="4;6;4" dur="1s" repeatCount="indefinite"/></circle>`;
+  for (const b of items) s += blockSvg(b, x, DOC_TOP);
+  return s + '</g>';
+}
+
+function render(t) {
+  let s = `<rect width="${W}" height="${H}" fill="${COLORS.bg}"/>`;
+
+  // ---- main agent ----
+  const main = BLOCKS.map((b, i) => ({ ...b, p: prog(t, APPEAR[i], APPEAR[i] + APPEAR_DUR) }));
+  const leftCollapse = prog(t, 10.4, 11.2);
+  const mainL = layout(main, leftCollapse > 0 ? { from: RANGE[0], to: RANGE[1], c: leftCollapse } : null);
+  const contentH = mainL.height - PAD;
+  const tokens = Math.round((contentH - PAD) / (THRESHOLD - PAD) * ARCHIVE_AT * 0.97);
+  const over = tokens > ARCHIVE_AT;
+
+  // threshold pulse when crossed
+  const pulse = t > 4.0 && t < 5.0 ? Math.sin((t - 4.0) / 1.0 * Math.PI * 3) ** 2 : 0;
+  const forkP = prog(t, 4.9, 5.9);
+  const fade = 1 - prog(t, 13.2, 14);
+  const mainX = lerp(lerp(CENTER_X, LEFT_X, forkP), CENTER_X, prog(t, 11.4, 12.2));
+
+  s += `<g opacity="${fade}">`;
+  const mainSvg = docSvg({
+    x: mainX, title: 'Main agent', sub: `${tokens}k tokens`, subColor: over ? COLORS.threshold : COLORS.muted,
+    items: mainL.items, height: mainL.height, lineColor: COLORS.text,
+  });
+  const ty = DOC_TOP + THRESHOLD;
+  const thresholdSvg = `<g opacity="${0.75 + 0.25 * pulse}">
+    <line x1="${mainX - 12}" y1="${ty}" x2="${mainX + DOC_W + 12}" y2="${ty}" stroke="${COLORS.threshold}" stroke-width="${1.5 + pulse * 2}" stroke-dasharray="6 4"/>
+    <text x="${mainX - 16}" y="${ty + 4}" fill="${COLORS.threshold}" font-size="11" text-anchor="end" font-family="ui-monospace, monospace">archiveAt</text>
+  </g>`;
+  // ---- archive agent (fork) ----
+  if (t < 4.9) s += mainSvg + thresholdSvg;
+  if (t >= 4.9) {
+    const rightFade = 1 - prog(t, 10.8, 11.6);
+    const fx = lerp(mainX, RIGHT_X, forkP);
+    const copy = BLOCKS.slice(0, FORKED).map(b => ({ ...b, p: 1 }));
+    const instr = { ...INSTRUCTIONS, p: prog(t, 5.9, 6.3) };
+    const rightCollapse = prog(t, 9.0, 9.8);
+    const copyL = layout([...copy, instr], rightCollapse > 0 ? { from: RANGE[0], to: RANGE[1], c: rightCollapse } : null);
+    s += docSvg({
+      x: fx, title: 'Archive agent', sub: 'forked', items: copyL.items, height: copyL.height,
+      opacity: rightFade, headO: prog(t, 5.5, 6.0), lineColor: COLORS.scan, tip: false,
+    });
+    s += mainSvg + thresholdSvg;
+
+    // scanning band over the forked context (everything before the fork point)
+    const bandX = RIGHT_X + PAD + 14, bandW = DOC_W - PAD * 2 - 14;
+    const r = rangeBounds(copy, RANGE[0], RANGE[1]);
+    const scanEnd = layout(copy).height - PAD;
+    if (t >= 6.4 && t < 9.0) {
+      const sweep = clamp((t - 6.4) / 1.6);
+      const settle = prog(t, 8.0, 8.7);
+      const bandH = 22;
+      const sy = lerp(PAD + sweep * (scanEnd - PAD - bandH), r.y - 3, settle);
+      const sh = lerp(bandH, r.h + 6, settle);
+      const sc = settle >= 1 ? COLORS.summary : COLORS.scan;
+      s += `<rect x="${bandX - 4}" y="${DOC_TOP + sy}" width="${bandW + 8}" height="${sh}" rx="6" fill="${sc}" fill-opacity="0.12" stroke="${sc}" stroke-width="2" opacity="${rightFade}"/>`;
+      // eye/peek label
+      s += `<text x="${RIGHT_X + DOC_W + 10}" y="${DOC_TOP + sy + sh / 2 + 4}" fill="${sc}" font-size="11" font-family="ui-monospace, monospace">${settle >= 1 ? 'm2–m5' : 'reading'}</text>`;
+    }
+
+    // summary flies from the archive agent to the main agent
+    const fly = prog(t, 9.9, 10.6);
+    if (t >= 9.9 && t < 10.7) {
+      const sx = lerp(RIGHT_X, mainX, fly) + PAD + 14;
+      const sy = DOC_TOP + r.y - Math.sin(fly * Math.PI) * 40;
+      s += `<g>
+        <rect x="${sx}" y="${sy}" width="${bandW}" height="${SUMMARY_H}" rx="4" fill="${COLORS.summary}" fill-opacity="0.25" stroke="${COLORS.summary}" stroke-dasharray="3 3"/>
+        <text x="${sx + 7}" y="${sy + 13}" fill="${COLORS.summary}" font-family="ui-monospace, monospace" font-size="9.5">b1 · summary</text>
+      </g>`;
+    }
+  }
+
+  // highlight the target range on the main agent right before it collapses
+  if (t >= 9.9 && t < 11.4) {
+    const hl = Math.min(prog(t, 9.9, 10.3), 1 - prog(t, 11.0, 11.4));
+    const top = mainL.items.rangeTop ?? rangeBounds(main, RANGE[0], RANGE[1]).y;
+    const h = mainL.items.rangeH ?? rangeBounds(main, RANGE[0], RANGE[1]).h;
+    s += `<rect x="${mainX + PAD + 10}" y="${DOC_TOP + top - 3}" width="${DOC_W - PAD * 2 - 6}" height="${h + 6}" rx="6" fill="none" stroke="${COLORS.summary}" stroke-width="2" opacity="${hl}"/>`;
+  }
+
+  s += `</g>`;
+  s += `<defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="${COLORS.scan}"/></marker></defs>`;
+  document.getElementById('stage').innerHTML = s;
+}
+
+// ---- autoplay loop (optional fixed time for frame export) ----
+const params = new URLSearchParams(location.search);
+let t = parseFloat(params.get('t') ?? '0');
+const playing = !params.has('t');
+let last = performance.now();
+function frame(now) {
+  if (playing) {
+    t = (t + (now - last) / 1000) % T;
+    render(t);
+  }
+  last = now;
+  requestAnimationFrame(frame);
+}
+window.render = render;
+render(t);
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
