@@ -30,6 +30,27 @@ const deferred = () => {
 const range = { start: "m1", end: "m3", topic: "config", summary: "Config /config.ts: port 8080, flag zebra." }
 const output = (summary = range.summary) => JSON.stringify([{ ...range, summary }])
 
+test("idle includes superseded workers and rejects cancellation that does not stop them", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"] })
+  const { state, units, jobs } = setup()
+  const generation = deferred()
+  jobs.start(state, units, model, () => generation.promise)
+  await setImmediate()
+  jobs.cancel("Host compaction")
+  jobs.start(state, units, model, async () => "[]")
+  await setImmediate()
+  let idle = false
+  const waiting = jobs.idle()!.then(() => { idle = true })
+  const refused = assert.rejects(waiting, /refusing to overlap/)
+  await setImmediate()
+  assert.equal(idle, false, "the newer job finishing does not mean the old inference stopped")
+  t.mock.timers.tick(10_000)
+  await refused
+  generation.resolve(output())
+  await setImmediate()
+  assert.equal(jobs.idle(), undefined)
+})
+
 test("worker selects ranges from a snapshot and commits only at a later request", async (t) => {
   t.mock.method(Date, "now", () => 1000)
   const { state, units, jobs } = setup()

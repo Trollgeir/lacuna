@@ -20,7 +20,7 @@ export const registerTools = (tool: Plugin.Context["tool"], operations: Operatio
   tool.transform((editor) => {
     editor.add({
       name: "archive",
-      description: "Request background context cleanup after consuming large amounts of data. The archive agent chooses what to summarize or keep. Returns immediately; completion is silent.",
+      description: "Request context cleanup after consuming large amounts of data. The archive agent chooses what to summarize or keep. Returns immediately; completion is silent.",
       input: { type: "object", properties: {}, additionalProperties: false } as never,
       options: { codemode: false },
       execute: async (_input: unknown, context) => run(() => operations.archive(context.sessionID)),

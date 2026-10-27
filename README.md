@@ -27,7 +27,7 @@ present, the footer reports it as unresolved; `/lacuna` lists the affected block
 
 ## But this ruins the prompt cache?
 
-The archive job uses the same model and copies the primary request's prefix, appending archive instructions so it
+By default, the archive job uses the same model and copies the primary request's prefix, appending archive instructions so it
 can reuse the prompt cache. Applying summaries changes the prefix from the first archived message onward; the
 provider may need to reprocess that portion. Subsequent requests are smaller.
 
@@ -57,6 +57,81 @@ Add the package to `plugins` in `opencode.json`. OpenCode installs it from npm o
 ```
 
 `archiveAt` is either a fraction of the context window (`0.6`) or an absolute token count (`150000`). Default `200000`.
+
+### Blocking archive requests
+
+`archiveMode` defaults to `"background"`, which lets the main agent continue while archiving runs. For a local model
+that cannot handle two inference requests at once, set `"archiveMode": "blocking"` in the plugin's options:
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": [{ "package": "opencode-lacuna", "options": { "archiveMode": "blocking" } }]
+}
+```
+
+Automatic and manual archive jobs use the same pipeline in both modes. In blocking mode, the next primary request
+waits for archiving and cleanup, then receives the summaries. The archive tool itself still returns immediately.
+Failed or skipped jobs resume with the originals. Compaction cancels the archive and waits for its worker to stop.
+
+Archive requests have a five-minute timeout. If a cancelled worker still has not stopped after ten seconds, blocking
+mode fails the waiting request instead of allowing overlapping requests. Retry once the worker has stopped.
+Stopping inference itself depends on the provider honoring cancellation.
+
+`archiveModel` works unchanged in either mode. Omitting its model inherits the main model; settings-only overrides
+can reduce reasoning effort. Blocking does not coordinate other sessions, subagents, or auxiliary requests such as
+`/btw` and title generation, and switching models does not guarantee that only one model remains loaded in memory.
+
+### Use a different archive model
+
+Set `archiveModel` explicitly to use another OpenCode-registered model for automatic and manual archive jobs:
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": [{
+    "package": "opencode-lacuna",
+    "options": {
+      "archiveAt": 0.6,
+      "archiveModel": {
+        "model": "your-provider/your-model#your-variant",
+        "options": { "maxTokens": 8192 }
+      }
+    }
+  }]
+}
+```
+
+Use the catalog IDs from OpenCode's model selector; `#variant` is optional. Omitting `archiveModel` preserves the
+default: inherit the main model and its request overrides. Lacuna never automatically selects a cheaper model.
+You can also omit `archiveModel.model` to inherit the main model while overriding only its archive request settings:
+
+```jsonc
+"archiveModel": {
+  "options": { "maxTokens": 8192 }
+}
+```
+
+In that case the archive request keeps the main model (including its variant) and per-call settings, applies your
+overrides on top, and uses the existing same-session fork rather than a temporary child session.
+
+An explicit archive model uses its own OpenCode-configured provider, model, and variant settings, not the main
+request's per-call overrides. Optional `archiveModel.options` overrides those defaults for archive requests only;
+use semantic request fields such as `maxTokens`, `temperature`, or your provider's reasoning settings (for example,
+`reasoningEffort` on OpenAI Responses). Provider-specific fields must match the selected model's protocol.
+`maxTokens` must be a positive integer within the model's registered output limit; capacity checks reserve space for it.
+Standard fields are validated with OpenCode's `GenerationOptions` schema; provider-specific options pass through to
+the selected protocol. New standard fields become available when the OpenCode AI dependency is updated.
+Without it, the check reserves the inherited per-call output limit, if any, or the registered output limit.
+The explicitly selected archive model receives the captured system
+instructions, messages, and tool schemas through a temporary child session, removed after the job finishes.
+The main session's model is unchanged.
+
+Using another model loses reuse of the main model's prompt cache, but can still be cheaper overall. Choose a model
+with enough input capacity for the entire captured context. Lacuna checks registered models, variants, and estimated
+input capacity before generation. Unavailable models, unknown variants, insufficient capacity, and provider errors
+fail the archive job, shown in `/lacuna`; originals remain visible and there is no fallback to the main model.
+Capacity checks are estimates, not exact token counts.
 
 Don't run another context pruning plugin at the same time: two plugins rewriting the same messages will conflict.
 

@@ -11,17 +11,9 @@ import { ArchiveJobs } from "../../core/archive/jobs.ts"
 import { ArchiveTrigger, archiveThreshold } from "../../core/archive/trigger.ts"
 import { Lacuna, type Stats } from "../rpc.ts"
 import { registerTools } from "./tools.ts"
-import { forkRequest, makerFor, stripAll, type ModelContext } from "./host.ts"
-
-interface Options {
-  /** Automatic archive threshold: a fraction of the context window (≤ 1) or an absolute token count (> 1). */
-  readonly archiveAt: number
-}
-
-const readOptions = (raw: unknown): Options => {
-  const { archiveAt } = (raw ?? {}) as Partial<Options>
-  return { archiveAt: typeof archiveAt === "number" && archiveAt > 0 ? archiveAt : 200_000 }
-}
+import { makerFor, modelKey, stripAll, type ModelContext } from "./host.ts"
+import { readOptions } from "./options.ts"
+import { archiveExecution } from "./archive.ts"
 
 interface Live {
   units: Unit[]
@@ -32,8 +24,6 @@ interface Live {
   model: string
   request: ModelContext
 }
-
-const modelKey = (model: ModelContext["model"]) => `${model.providerID}/${model.id}#${model.variant ?? ""}`
 
 /** A context hook call, kept until the provider reports the size of the request it produced. */
 interface Pending {
@@ -50,6 +40,7 @@ interface Measured {
 }
 
 interface SessionRuntime {
+  lifetime: AbortController
   state?: SessionState
   // Tools act on the transcript captured by the latest primary context hook.
   view?: Live
@@ -77,17 +68,16 @@ export default Plugin.define({
       const existing = sessions.get(sessionID)
       if (existing) return existing
       const value: SessionRuntime = {
+        lifetime: new AbortController(),
         trigger: new ArchiveTrigger(), snapshots: new Map(), measured: new Map(),
         pending: [], revision: 0, completedRevision: 0,
       }
       sessions.set(sessionID, value)
       return value
     }
-    const forks = new Map<string, { sessionID: string; request: ModelContext }>()
     // Commit, restore, compaction and deletion share one ordering; generation stays outside it.
     let disposed = false
-    const serial = async <T>(sessionID: string, fn: () => Promise<T>): Promise<T> => {
-      const session = sessionFor(sessionID)
+    const serial = async <T>(sessionID: string, fn: () => Promise<T>, session = sessionFor(sessionID)): Promise<T> => {
       const previous = session.lock ?? Promise.resolve()
       const result = previous.then(() => {
         if (disposed) throw new ArchiveError("Lacuna has unloaded.")
@@ -100,6 +90,22 @@ export default Plugin.define({
         return await result
       } finally {
         if (session.lock === tail) delete session.lock
+      }
+    }
+
+    /** Admit context work atomically, but never hold its lock while waiting for inference to stop. */
+    const withArchiveIdle = async (sessionID: string, fn: () => Promise<void>, before?: () => void) => {
+      const session = sessionFor(sessionID)
+      for (;;) {
+        const blocked = await serial(sessionID, async () => {
+          before?.()
+          const waiting = options.archiveMode === "blocking" ? session.job?.idle(session.lifetime.signal) : undefined
+          if (waiting) return { waiting }
+          await fn()
+          return undefined
+        }, session)
+        if (!blocked) return
+        await blocked.waiting
       }
     }
 
@@ -140,6 +146,7 @@ export default Plugin.define({
       factors.set(model, value)
       return value
     }
+    const execution = await archiveExecution(ctx, options.archiveModel, async (model) => (await modelFactor(model)).factor)
     const scaleFor = (sessionID: string, model: string) => {
       const measured = sessions.get(sessionID)?.measured.get(model)?.calibration
       const factor = factors.get(model)?.factor ?? 1
@@ -226,8 +233,9 @@ export default Plugin.define({
     }
 
     const forget = (sessionID: string) => serial(sessionID, async () => {
+      sessions.get(sessionID)?.lifetime.abort(new ArchiveError("The session was deleted."))
       sessions.get(sessionID)?.job?.cancel("The session was deleted.")
-      for (const [prompt, fork] of forks) if (fork.sessionID === sessionID) forks.delete(prompt)
+      execution.forget(sessionID)
       sessions.delete(sessionID)
       await ctx.storage.remove(`session/${sessionID}`)
       const prefix = `snapshot/${sessionID}/`
@@ -277,42 +285,17 @@ export default Plugin.define({
       const tokens = corrected(sessionID, view).tokens
       if (!explicit && !trigger.shouldStart(tokens, archiveThreshold(options.archiveAt, view.limit))) return
       const state = await load(sessionID)
-      const request = forkRequest(view.request)
-      const marker = `<lacuna-job id="${crypto.randomUUID()}"/>`
-      job.start(state, view.units, modelKey(request.model), async (instructions, signal) => {
-        const prompt = `${marker}\n${instructions}`
-        forks.set(prompt, { sessionID, request })
-        try {
-          const result = await ctx.session.generate({ sessionID, prompt }, { signal })
-          return result.text
-        } finally {
-          forks.delete(prompt)
-        }
+      const generate = execution.capture(view.request)
+      // A replacement must not overlap a cancelled worker that is still stopping.
+      const previous = options.archiveMode === "blocking" ? job.idle() : undefined
+      job.start(state, view.units, modelKey(view.request.model), async (instructions, signal) => {
+        await previous
+        signal.throwIfAborted()
+        return generate(instructions, signal)
       })
       if (explicit) trigger.recordAttempt(tokens)
       return "Archive job started."
     }
-
-    await ctx.session.hook("generate", (event) => {
-      // Match our unique suffix, not just the session: /btw may run concurrently.
-      const suffix = event.messages.at(-1)
-      const prompt = suffix?.role === "user" && suffix.content.length === 1 && suffix.content[0]?.type === "text"
-        ? suffix.content[0].text : undefined
-      const fork = typeof prompt === "string" ? forks.get(prompt) : undefined
-      if (!fork || fork.sessionID !== event.sessionID) return
-      const request = fork.request
-      if (disposed || modelKey(event.model) !== modelKey(request.model)) {
-        throw new ArchiveError("The model changed before the archive fork could start.")
-      }
-      if (Object.keys(request.tools).some((name) => !(name in event.tools))) {
-        throw new ArchiveError("The tool catalog changed before the archive fork could start.")
-      }
-      // Replay the entire primary prefix, including schemas and request overrides. Only the suffix is new.
-      event.system = request.system
-      event.messages = [...request.messages, suffix!]
-      event.tools = request.tools
-      event.options = request.options
-    })
 
     // Original messages of archived units, so blocks survive compaction. Loaded lazily, once per session.
     const snapshotKey = (sessionID: string, ref: string) => `snapshot/${sessionID}/${ref}`
@@ -357,8 +340,7 @@ export default Plugin.define({
       return { make, state, current, units }
     }
 
-    await ctx.session.hook("compaction", (event) => serial(event.sessionID, async () => {
-      sessions.get(event.sessionID)?.job?.cancel("Host compaction invalidated the captured context.")
+    await ctx.session.hook("compaction", (event) => withArchiveIdle(event.sessionID, async () => {
       const incoming = event.messages as unknown as Msg[]
       if (!incoming.length) return
       const { make, state, current, units } = await prepare(event.sessionID, incoming)
@@ -366,9 +348,9 @@ export default Plugin.define({
       await save(event.sessionID, state)
       const messages = kept.length ? kept : [make({ role: "user", content: [{ type: "text", text: "Everything before this point is archived." }] })]
       event.messages = messages as unknown as typeof event.messages
-    }))
+    }, () => sessions.get(event.sessionID)?.job?.cancel("Host compaction invalidated the captured context.")))
 
-    await ctx.session.hook("context", (event) => serial(event.sessionID, async () => {
+    await ctx.session.hook("context", (event) => withArchiveIdle(event.sessionID, async () => {
       const incoming = event.messages as unknown as Msg[]
       if (!incoming.length) return
       const prepared = await prepare(event.sessionID, incoming)
@@ -385,7 +367,7 @@ export default Plugin.define({
           state = candidate
           job!.committed()
         } catch {
-          // Background summaries must never fail the user's request; the job stays ready and retries.
+          // Failed persistence keeps the originals; the ready job retries on a later request.
         }
       }
       const result = projectContext(state, units, make)
@@ -442,8 +424,11 @@ export default Plugin.define({
     return () => {
       disposed = true
       events.abort()
-      for (const session of sessions.values()) session.job?.cancel("Lacuna unloaded; originals were kept.")
-      forks.clear()
+      for (const session of sessions.values()) {
+        session.lifetime.abort(new ArchiveError("Lacuna has unloaded."))
+        session.job?.cancel("Lacuna unloaded; originals were kept.")
+      }
+      execution.dispose()
     }
   },
 })

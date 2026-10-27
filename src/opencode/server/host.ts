@@ -5,6 +5,8 @@ import type { Msg } from "../../core/types.ts"
 
 export type ModelContext = Extract<Parameters<Parameters<Plugin.Context["session"]["hook"]>[1]>[0], { tools: unknown; messages: unknown }>
 
+export const modelKey = (model: ModelContext["model"]) => `${model.providerID}/${model.id}#${model.variant ?? ""}`
+
 export const makerFor = (incoming: readonly Msg[]): MakeMessage => {
   const Ctor = incoming[0]?.constructor as (new (input: Msg) => Msg) | undefined
   return (message) => {
