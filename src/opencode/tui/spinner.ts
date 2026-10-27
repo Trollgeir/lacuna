@@ -1,4 +1,4 @@
-import type { ArchiveJobStatus } from "../core/archive/status.ts"
+import type { ArchiveJobStatus } from "../../core/archive/status.ts"
 
 const frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 export const SPINNER_INTERVAL = 80

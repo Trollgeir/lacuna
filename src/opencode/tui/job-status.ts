@@ -1,4 +1,4 @@
-import type { ArchiveJobStatus } from "../core/archive/status.ts"
+import type { ArchiveJobStatus } from "../../core/archive/status.ts"
 
 const KEPT = "The job did not change your context. Originals were kept; the agent can retry archiving."
 

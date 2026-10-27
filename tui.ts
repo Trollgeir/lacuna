@@ -1,1 +1,1 @@
-export { default } from "./src/tui/plugin.tsx"
+export { default } from "./src/opencode/tui/plugin.tsx"

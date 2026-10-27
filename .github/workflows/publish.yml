@@ -55,7 +55,7 @@ jobs:
             })
           }
 
-          const filename = path.join(root, "src/tui/plugin.tsx")
+          const filename = path.join(root, "src/opencode/tui/plugin.tsx")
           const compiled = await transformSolidSource(await readFile(filename, "utf8"), {
             filename,
             moduleName: "@opentui/solid",
@@ -64,8 +64,8 @@ jobs:
           if (compiled.includes("/jsx-runtime") || compiled.includes("/jsx-dev-runtime")) {
             throw new Error("Unexpected automatic JSX runtime import in compiled TUI")
           }
-          await writeFile(path.join(staging, "src/tui/plugin.js"), compiled + "\n")
-          await writeFile(path.join(staging, "tui.ts"), 'export { default } from "./src/tui/plugin.js"\n')
+          await writeFile(path.join(staging, "src/opencode/tui/plugin.js"), compiled + "\n")
+          await writeFile(path.join(staging, "tui.ts"), 'export { default } from "./src/opencode/tui/plugin.js"\n')
           await writeFile(path.join(staging, "package.json"), JSON.stringify(manifest, null, 2) + "\n")
           await appendFile(process.env.GITHUB_OUTPUT, `directory=${staging}\n`)
           NODE

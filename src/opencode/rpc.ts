@@ -1,6 +1,6 @@
 import { Rpc } from "@opencode/plugin/rpc"
 import { Schema } from "effect"
-import { archiveJobStatus } from "./core/archive/status.ts"
+import { archiveJobStatus } from "../core/archive/status.ts"
 
 const stats = Schema.Struct({
   sessionID: Schema.String,

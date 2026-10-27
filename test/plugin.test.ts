@@ -2,9 +2,9 @@ import assert from "node:assert/strict"
 import { setImmediate } from "node:timers/promises"
 import { test } from "node:test"
 import { Media, Message } from "@opencode/ai/effect"
-import plugin from "../src/server/plugin.ts"
+import plugin from "../src/opencode/server/plugin.ts"
 import type { Msg, SessionState } from "../src/core/types.ts"
-import type { Stats } from "../src/rpc.ts"
+import type { Stats } from "../src/opencode/rpc.ts"
 
 interface HookEvent {
   sessionID: string

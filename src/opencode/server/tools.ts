@@ -1,5 +1,5 @@
 import type { Plugin } from "@opencode/plugin"
-import { ArchiveError } from "../core/state.ts"
+import { ArchiveError } from "../../core/state.ts"
 
 interface Operations {
   archive(sessionID: string): Promise<string>

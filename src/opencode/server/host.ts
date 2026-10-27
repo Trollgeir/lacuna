@@ -1,7 +1,7 @@
 import type { Plugin } from "@opencode/plugin"
 import { Media, Message } from "@opencode/ai/effect"
-import { stripEchoedTags, type MakeMessage } from "../core/projection.ts"
-import type { Msg } from "../core/types.ts"
+import { stripEchoedTags, type MakeMessage } from "../../core/projection.ts"
+import type { Msg } from "../../core/types.ts"
 
 export type ModelContext = Extract<Parameters<Parameters<Plugin.Context["session"]["hook"]>[1]>[0], { tools: unknown; messages: unknown }>
 

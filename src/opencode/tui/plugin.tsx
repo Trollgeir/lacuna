@@ -1,10 +1,10 @@
 /** @jsxImportSource @opentui/solid */
 import { Plugin } from "@opencode/plugin/tui"
 import { createEffect, createSignal, onCleanup, Show } from "solid-js"
-import { formatTokens } from "../core/format.ts"
+import { formatTokens } from "../../core/format.ts"
 import { jobDetails, jobLabel, jobWarns } from "./job-status.ts"
 import { archiveSpinner, SPINNER_INTERVAL } from "./spinner.ts"
-import type { ArchiveJobStatus } from "../core/archive/status.ts"
+import type { ArchiveJobStatus } from "../../core/archive/status.ts"
 import { Lacuna, type Stats } from "../rpc.ts"
 import { connectStatusFeed } from "./state.ts"
 

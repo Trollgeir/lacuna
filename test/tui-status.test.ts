@@ -1,8 +1,8 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
 import type { ArchiveJobStatus } from "../src/core/archive/status.ts"
-import type { Stats } from "../src/rpc.ts"
-import { connectStatusFeed, StatusFeed } from "../src/tui/state.ts"
+import type { Stats } from "../src/opencode/rpc.ts"
+import { connectStatusFeed, StatusFeed } from "../src/opencode/tui/state.ts"
 
 const job = (status: ArchiveJobStatus["status"] = "running"): ArchiveJobStatus => ({
   id: "j1", status, startedAt: 1000, updatedAt: 62000,
