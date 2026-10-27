@@ -4,9 +4,6 @@
   "description": "OpenCode plugin that lets the model archive parts of its own context and restore them later.",
   "type": "module",
   "license": "MIT",
-  "engines": {
-    "node": ">=26.4.0"
-  },
   "main": "./index.ts",
   "exports": {
     ".": "./index.ts",
