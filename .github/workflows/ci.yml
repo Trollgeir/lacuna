@@ -21,7 +21,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: 26.4.0
           package-manager-cache: false
 
       # No lockfile is committed, so use npm install rather than npm ci.

@@ -43,6 +43,8 @@ lists the tiers in each model's `cost` metadata; if yours is lower, set `archive
 
 ## Install
 
+Requires OpenCode 2.2.0 or newer.
+
 Add the package to `plugins` in `opencode.json`. OpenCode installs it from npm on the next start:
 
 ```jsonc
@@ -57,6 +59,8 @@ Add the package to `plugins` in `opencode.json`. OpenCode installs it from npm o
 Don't run another context pruning plugin at the same time: two plugins rewriting the same messages will conflict.
 
 ## Develop
+
+Use Node.js 26.4.0 or newer, as required by OpenTUI 0.7.
 
 ```sh
 git clone https://github.com/Trollgeir/lacuna

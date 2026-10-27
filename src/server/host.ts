@@ -1,5 +1,5 @@
 import type { Plugin } from "@opencode/plugin"
-import { Media, Message } from "@opencode/ai"
+import { Media, Message } from "@opencode/ai/effect"
 import { stripEchoedTags, type MakeMessage } from "../core/projection.ts"
 import type { Msg } from "../core/types.ts"
 

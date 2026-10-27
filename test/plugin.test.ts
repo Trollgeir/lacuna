@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { setImmediate } from "node:timers/promises"
 import { test } from "node:test"
-import { Media, Message } from "@opencode/ai"
+import { Media, Message } from "@opencode/ai/effect"
 import plugin from "../src/server/plugin.ts"
 import type { Msg, SessionState } from "../src/core/types.ts"
 import type { Stats } from "../src/rpc.ts"
