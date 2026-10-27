@@ -67,8 +67,9 @@ Add the package to `plugins` in `opencode.json`. OpenCode installs it from npm o
 }
 ```
 
-`archiveAt` is either a fraction of the context window (`0.6`) or an absolute token count (`150000`). Default `200000`.
+`archiveAt` takes a fraction of the context window (`0.6` means 60%) or an absolute token count. Default is `200000`.
 By default, archiving runs in the background using the main model and its settings.
+`archiveModel.options` accepts generation settings such as `maxTokens`, `temperature`, and provider-specific options like `reasoningEffort`.
 
 Don't run another context pruning plugin at the same time: two plugins rewriting the same messages will conflict.
 
