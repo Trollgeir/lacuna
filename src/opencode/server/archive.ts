@@ -3,7 +3,6 @@ import { ArchiveError } from "../../core/state.ts"
 import { forkRequest, modelKey, type ModelContext } from "./host.ts"
 import type { Options } from "./options.ts"
 
-/** Owns OpenCode request replay and temporary sessions; archive policy and state remain in core. */
 export const archiveExecution = async (
   ctx: Pick<Plugin.Context, "model" | "session">,
   config: Options["archiveModel"],
@@ -29,7 +28,6 @@ export const archiveExecution = async (
     event.system = request.system
     event.messages = [...request.messages, suffix!]
     event.tools = request.tools
-    // Explicit models use their own settings; otherwise retain the captured primary overrides.
     event.options = config ? { ...(config.model ? event.options : request.options), ...structuredClone(config.options) } : request.options
   })
 

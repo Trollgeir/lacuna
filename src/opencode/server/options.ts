@@ -4,7 +4,6 @@ import { Schema } from "effect"
 import { ArchiveError } from "../../core/state.ts"
 import type { ModelContext } from "./host.ts"
 
-// Match OpenCode's request-hook options: standard generation fields plus protocol-specific overrides.
 const requestOptions = Schema.StructWithRest(
   Schema.Struct(GenerationOptions.fields),
   [Schema.Record(Schema.String, Schema.Unknown)],
@@ -13,7 +12,6 @@ const requestOptions = Schema.StructWithRest(
 export interface Options {
   /** Automatic archive threshold: a fraction of the context window (≤ 1) or an absolute token count (> 1). */
   readonly archiveAt: number
-  /** Blocking serializes primary and archive requests within a session. */
   readonly archiveMode: "background" | "blocking"
   readonly archiveModel?: {
     /** Omit to inherit the primary model, including its variant and request overrides. */
