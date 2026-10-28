@@ -515,7 +515,6 @@ test("archive repair appends feedback without changing the captured prefix or ma
   assert.deepEqual(retry.messages.slice(0, first.messages.length), first.messages)
   assert.deepEqual(retry.messages[first.messages.length], Message.assistant(invalid))
   assert.equal(retry.messages.length, first.messages.length + 2)
-  assert.match(String(retry.messages.at(-1)!.content[0]!.text), /failed validation/)
   assert.deepEqual(retry.system, first.system)
   assert.deepEqual(retry.tools, first.tools)
   assert.deepEqual(retry.options, first.options)

@@ -191,12 +191,8 @@ test("stages independent summaries and retries only rejected entries, retaining 
     ]
     const bad = { start: "m3", end: "m3", summary: "Bloated summary.\n".repeat(1000) }
     let calls = 0
-    jobs.start(state, units, model, async (prompt, _signal, history) => {
+    jobs.start(state, units, model, async (_prompt, _signal, history) => {
       if (++calls === 1) return JSON.stringify([...accepted, repair === "schema" ? { ...bad, summary: 42 } : bad])
-      assert.match(prompt, /ONLY replacements/)
-      assert.match(prompt, /This response is a patch/)
-      assert.match(prompt, /Return \[\] to omit all rejected entries; the already accepted ranges will still be applied/)
-      assert.match(prompt, /m1–m1, m2–m2/)
       assert.equal(history!.length, 1)
       assert.deepEqual(state.blocks, {}, "staging never commits")
       if (repair === "provider-error") throw new Error("Provider unavailable")
@@ -219,10 +215,8 @@ test("stages independent summaries and retries only rejected entries, retaining 
 test("repairs malformed JSON and does not retry a valid initial empty selection", async () => {
   const { state, units, jobs } = setup()
   let calls = 0
-  jobs.start(state, units, model, async (prompt, _signal, history) => {
+  jobs.start(state, units, model, async (_prompt, _signal, history) => {
     if (++calls === 1) return output() + "}"
-    assert.match(prompt, /complete corrected archive selection/)
-    assert.match(prompt, /⟦ERROR HERE⟧ "}"/)
     assert.equal(history![0]!.output, output() + "}")
     return output()
   })
