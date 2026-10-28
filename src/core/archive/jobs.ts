@@ -8,6 +8,34 @@ import { candidates } from "./candidates.ts"
 
 const reason = (error: unknown) => (error instanceof Error ? error.message : String(error))
 
+interface Worker {
+  done: Promise<void>
+  signal: AbortSignal
+  abortedAt?: number
+}
+
+/** Cancellation changes job status immediately, but inference and cleanup may still be draining. */
+const waitForWorker = (worker: Worker, signal?: AbortSignal): Promise<void> => new Promise((resolve, reject) => {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const finish = (error?: unknown) => {
+    clearTimeout(timer)
+    worker.signal.removeEventListener("abort", stopping)
+    signal?.removeEventListener("abort", interrupted)
+    if (error !== undefined) reject(error)
+    else resolve()
+  }
+  const stopping = () => {
+    timer = setTimeout(() => finish(new ArchiveError("Archive generation did not stop after cancellation; refusing to overlap requests.")),
+      Math.max(0, 10_000 - (Date.now() - worker.abortedAt!)))
+  }
+  const interrupted = () => finish(signal!.reason)
+  worker.done.then(() => finish())
+  worker.signal.addEventListener("abort", stopping, { once: true })
+  signal?.addEventListener("abort", interrupted, { once: true })
+  if (worker.signal.aborted) stopping()
+  if (signal?.aborted) interrupted()
+})
+
 interface Target {
   readonly start: string
   readonly end: string
@@ -39,6 +67,7 @@ export class ArchiveJobs {
   }
 
   private next = 1
+  private readonly workers = new Set<Worker>()
   private job?: {
     id: string
     model: string
@@ -75,11 +104,16 @@ export class ArchiveJobs {
       protectedRefs: protectedIndexes(job.units).flatMap((index) => refs[index] ? [refs[index]!] : []),
       candidates: candidates(job.state, job.units),
     })
-    void Promise.resolve().then(() => {
+    const signal = AbortSignal.any([job.controller.signal, AbortSignal.timeout(300_000)])
+    const worker: Worker = { done: Promise.resolve(), signal, ...(signal.aborted ? { abortedAt: Date.now() } : {}) }
+    const aborted = () => { worker.abortedAt = Date.now() }
+    signal.addEventListener("abort", aborted, { once: true })
+    worker.done = Promise.resolve().then(() => {
       if (job.controller.signal.aborted) return undefined
-      return generate(prompt, AbortSignal.any([job.controller.signal, AbortSignal.timeout(300_000)]))
+      return generate(prompt, signal)
     }).then((output) => {
       if (job.status !== "running") return
+      signal.throwIfAborted()
       const ranges = parseRanges(output!)
       if (!ranges.length) {
         job.status = "skipped"
@@ -94,8 +128,21 @@ export class ArchiveJobs {
       job.status = "failed"
       job.detail = reason(error)
       this.changed()
+    }).finally(() => {
+      signal.removeEventListener("abort", aborted)
+      this.workers.delete(worker)
     })
+    this.workers.add(worker)
     return job.id
+  }
+
+  /** A snapshot of all pending workers, including cancelled and superseded jobs. Wait outside session locks. */
+  idle(signal?: AbortSignal): Promise<void> | undefined {
+    if (!this.workers.size) return undefined
+    return Promise.all([...this.workers].map((worker) => waitForWorker(worker, signal))).then(() => {}).catch((error: unknown) => {
+      if (!signal?.aborted) this.cancel(reason(error))
+      throw error
+    })
   }
 
   /** While selection runs, preserve its source snapshot; once ready, validate only its selected targets. */
@@ -177,6 +224,6 @@ export class ArchiveJobs {
 
   report(): string {
     const job = this.job
-    return job ? `Archive job ${job.id}: ${job.status}${job.detail ? ` — ${job.detail}` : ""}.` : "No background archive job."
+    return job ? `Archive job ${job.id}: ${job.status}${job.detail ? ` — ${job.detail}` : ""}.` : "No archive job."
   }
 }

@@ -10,7 +10,8 @@ interface HookEvent {
   sessionID: string
   messages: Msg[]
   system: { type: string; text: string }[]
-  model: { providerID: string; id: string }
+  model: { providerID: string; id: string; variant?: string }
+  agent: string
   tools: Record<string, { description: string; input: Record<string, unknown> }>
   options: Record<string, unknown>
 }
@@ -30,7 +31,7 @@ const deferred = () => {
   const promise = new Promise<string>((yes) => { resolve = yes })
   return { promise, resolve }
 }
-const setup = async (options = { archiveAt: 500 }) => {
+const setup = async (options: { archiveAt?: number; archiveMode?: unknown; archiveModel?: unknown } = { archiveAt: 500 }) => {
   const hooks = new Map<string, (event: HookEvent) => Promise<void>>()
   const tools = new Map<string, Tool>()
   const stored = new Map<string, unknown>()
@@ -38,6 +39,16 @@ const setup = async (options = { archiveAt: 500 }) => {
   const generations = [generation]
   const requests: (HookEvent & { prompt: string; signal: AbortSignal })[] = []
   const emitted: Stats[] = []
+  const models: { providerID: string; id: string; enabled: boolean; variants: { id: string }[]; limit: { context: number; output: number; input?: number } }[] = [
+    { providerID: "provider", id: "model", enabled: true, variants: [], limit: { context: 500_000, output: 16_000, input: 484_000 } },
+    { providerID: "other", id: "team/luna", enabled: true, variants: [{ id: "fast" }], limit: { context: 500_000, output: 8_000, input: 492_000 } },
+  ]
+  const children = new Map<string, { model: HookEvent["model"]; parentID: string; agent: string; location: { directory: string } }>()
+  const primaryModels = new Map<string, HookEvent["model"]>()
+  const created: string[] = []
+  const removed: string[] = []
+  let removal: ReturnType<typeof deferred> | undefined
+  let failGeneration = false
   let readStats!: (input: { sessionID: string }) => Promise<{ stats?: Stats }>
   const events: unknown[] = []
   let wake: (() => void) | undefined
@@ -47,6 +58,7 @@ const setup = async (options = { archiveAt: 500 }) => {
     sessionID, messages: messages.map((message) => Message.make(message as ConstructorParameters<typeof Message>[0])),
     system: [{ type: "text", text: "Main agent instructions" }],
     model: { providerID: "provider", id: "model" },
+    agent: "build",
     tools: { read: { description: "Read a file", input: { type: "object", properties: { path: { type: "string" } } } } },
     options: { temperature: 0.2, reasoningEffort: "high" },
   })
@@ -89,15 +101,35 @@ const setup = async (options = { archiveAt: 500 }) => {
         }
       },
     },
-    model: { list: async () => ({ data: [{ providerID: "provider", id: "model", limit: { context: 500_000 } }] }) },
+    model: { list: async () => ({ data: models }) },
     session: {
+      get: async () => ({ location: { directory: "/project" } }),
+      create: async (input: { model: HookEvent["model"]; parentID: string; agent: string; location: { directory: string } }) => {
+        const id = `child${created.length + 1}`
+        created.push(id)
+        children.set(id, input)
+        return { id }
+      },
+      remove: async ({ sessionID }: { sessionID: string }) => {
+        if (removal) await removal.promise
+        removed.push(sessionID)
+        children.delete(sessionID)
+      },
       hook: async (name: string, hook: (event: HookEvent) => Promise<void>) => { hooks.set(name, hook) },
       generate: async ({ sessionID, prompt }: { sessionID: string; prompt: string }, { signal }: { signal: AbortSignal }) => {
         const event = makeEvent([...transcript(), { role: "user", content: [{ type: "text", text: prompt }] }], sessionID)
+        const child = children.get(sessionID)
+        event.model = { ...(child?.model ?? primaryModels.get(sessionID) ?? event.model) }
+        if (child) {
+          event.model.variant ??= "default"
+          event.options = { temperature: 0.1 }
+          event.tools = {}
+        }
         await hooks.get("generate")!(event)
         const pending = generations[requests.length] ?? deferred()
         if (!generations.includes(pending)) generations.push(pending)
         requests.push({ ...event, prompt, signal })
+        if (failGeneration) throw new Error("Provider rejected archive request")
         return { text: await pending.promise }
       },
     },
@@ -109,6 +141,7 @@ const setup = async (options = { archiveAt: 500 }) => {
   const hook = async (name: string, messages = transcript(), sessionID = "s1", model?: HookEvent["model"]) => {
     const event = makeEvent(messages, sessionID)
     if (model) event.model = model
+    if (name === "context") primaryModels.set(sessionID, { ...event.model })
     await hooks.get(name)!(event)
     return event
   }
@@ -119,13 +152,109 @@ const setup = async (options = { archiveAt: 500 }) => {
     } })
     await setImmediate()
   }
-  return { tools, stored, generation, generations, requests, emitted, cleanup, invoke, hook, emit, finish,
+  return { tools, stored, generation, generations, requests, emitted, cleanup, invoke, hook, emit, finish, models, created, removed,
     readStats: (sessionID = "s1") => readStats({ sessionID }),
     failNextCommit: () => { failCommit = true },
     failNextSave: () => { failSave = true },
+    failArchiveGeneration: () => { failGeneration = true },
+    holdRemoval: () => (removal = deferred()),
   }
 }
 const output = JSON.stringify([{ start: "m1", end: "m2", summary: "Config /config.ts: port 8080, flag zebra." }])
+
+test("blocking waits for archive generation and cleanup before applying summaries", async (t) => {
+  const harness = await setup({ archiveAt: 500, archiveMode: "blocking", archiveModel: { model: "other/team/luna#fast" } })
+  t.after(harness.cleanup)
+  const removal = harness.holdRemoval()
+  await harness.hook("context")
+  await harness.finish()
+  let dispatched = false
+  const next = harness.hook("context").then((event) => { dispatched = true; return event })
+  await setImmediate()
+  assert.equal(dispatched, false)
+  harness.generation.resolve(output)
+  await setImmediate()
+  assert.equal(dispatched, false, "the worker is not idle until temporary-session cleanup finishes")
+  removal.resolve("")
+  assert.match(JSON.stringify((await next).messages), /<archived block/)
+  assert.deepEqual(harness.removed, ["child1"])
+  assert.equal((await harness.readStats()).stats!.job!.status, "applied")
+})
+
+test("deleting a session interrupts a blocking wait without resurrecting its context", async (t) => {
+  const harness = await setup({ archiveMode: "blocking" })
+  t.after(harness.cleanup)
+  await harness.hook("context")
+  assert.equal((await harness.invoke("archive", {})).content, "Archive job started.")
+  const waiting = assert.rejects(harness.hook("context"), /The session was deleted/)
+  await setImmediate()
+  harness.emit({ type: "session.deleted", created: Date.now(), data: { sessionID: "s1" } })
+  await waiting
+  assert.equal(harness.requests[0]!.signal.aborted, true)
+  assert.equal(harness.stored.has("session/s1"), false)
+  harness.generation.resolve(output)
+  await setImmediate()
+  assert.deepEqual(await harness.readStats(), {})
+})
+
+test("archiveModel uses a registered model and variant without changing the primary session", async (t) => {
+  const overrides = { maxTokens: 100, reasoningEffort: "low" }
+  const harness = await setup({ archiveAt: 500, archiveModel: { model: "other/team/luna#fast", options: overrides } })
+  t.after(harness.cleanup)
+  // This fits only with the explicit output budget, not the model's full 8k output allowance.
+  delete harness.models[1]!.limit.input
+  harness.models[1]!.limit.context = 8_010
+  const main = await harness.hook("context")
+  main.options.maxTokens = 12_000
+  await harness.finish()
+  const fork = harness.requests[0]!
+  assert.equal(fork.sessionID, "child1")
+  assert.deepEqual(fork.model, { providerID: "other", id: "team/luna", variant: "fast" })
+  assert.deepEqual(fork.system, main.system)
+  assert.deepEqual(fork.messages.slice(0, -1), main.messages)
+  assert.deepEqual(fork.tools, main.tools)
+  assert.deepEqual(fork.options, { temperature: 0.1, ...overrides }, "overrides apply on top of archive settings, not primary settings")
+  assert.deepEqual(main.options, { temperature: 0.2, reasoningEffort: "high", maxTokens: 12_000 })
+  assert.deepEqual(main.model, { providerID: "provider", id: "model" })
+  harness.generation.resolve(output)
+  await setImmediate()
+  assert.deepEqual(harness.removed, ["child1"])
+  const next = await harness.hook("context")
+  assert.match(JSON.stringify(next.messages), /<archived block/)
+  assert.equal((await harness.readStats()).stats!.job!.status, "applied", "validity is tied to the primary model, not the archive model")
+  assert.deepEqual(next.model, main.model)
+  assert.deepEqual((await harness.hook("generate")).model, main.model, "unrelated generation stays on the primary model")
+})
+
+test("archiveModel options without a model inherit the primary model, variant and remaining settings", async (t) => {
+  const harness = await setup({ archiveAt: 500, archiveModel: { options: { maxTokens: 8192, reasoningEffort: "low" } } })
+  t.after(harness.cleanup)
+  harness.models[0]!.variants.push({ id: "high" })
+  const model = { providerID: "provider", id: "model", variant: "high" }
+  const main = await harness.hook("context", transcript(), "s1", model)
+  main.options.maxTokens = 12_000
+  await harness.finish()
+  const fork = harness.requests[0]!
+  assert.equal(fork.sessionID, "s1")
+  assert.deepEqual(fork.model, model)
+  assert.deepEqual(fork.options, { temperature: 0.2, reasoningEffort: "low", maxTokens: 8192 })
+  assert.deepEqual(main.options, { temperature: 0.2, reasoningEffort: "high", maxTokens: 12_000 })
+  assert.deepEqual(harness.created, [])
+  harness.generation.resolve("[]")
+})
+
+test("failed archive generation cleans up without fallback or context mutation", async (t) => {
+  const harness = await setup({ archiveAt: 500, archiveModel: { model: "other/team/luna" } })
+  t.after(harness.cleanup)
+  harness.failArchiveGeneration()
+  await harness.hook("context")
+  await harness.finish()
+  assert.equal(harness.requests.length, 1, "must not fall back to the primary model")
+  assert.deepEqual(harness.requests[0]!.model, { providerID: "other", id: "team/luna", variant: "default" })
+  assert.deepEqual(harness.removed, ["child1"])
+  assert.equal((await harness.readStats()).stats!.job!.status, "failed")
+  assert.deepEqual((harness.stored.get("session/s1") as SessionState).blocks, {})
+})
 
 test("archive ranges spanning unidentified host messages become ready and keep those messages visible", async (t) => {
   const harness = await setup({ archiveAt: 1_000_000 })

@@ -14,7 +14,7 @@ block is the ID to restore, range identifies the originals, and topic is an opti
 The summary is prior conversation context, not a new user request.
 
 Archiving is automatic. You can also call archive without arguments to request cleanup
-after consuming a large amount of irrelevant data (such as logs). A background agent chooses what to summarize.
+after consuming a large amount of irrelevant data (such as logs). An archive agent chooses what to summarize.
 
 Use search_archive to find details in summaries and saved originals, then restore a block if more detail is needed.
 Restoring brings back one level: original messages, or contained blocks for a nested archive.`
