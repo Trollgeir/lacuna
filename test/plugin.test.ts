@@ -121,6 +121,7 @@ const setup = async (options: { archiveAt?: number; archiveMode?: unknown; archi
         const child = children.get(sessionID)
         event.model = { ...(child?.model ?? primaryModels.get(sessionID) ?? event.model) }
         if (child) {
+          event.model.variant ??= "default"
           event.options = { temperature: 0.1 }
           event.tools = {}
         }
@@ -249,6 +250,7 @@ test("failed archive generation cleans up without fallback or context mutation",
   await harness.hook("context")
   await harness.finish()
   assert.equal(harness.requests.length, 1, "must not fall back to the primary model")
+  assert.deepEqual(harness.requests[0]!.model, { providerID: "other", id: "team/luna", variant: "default" })
   assert.deepEqual(harness.removed, ["child1"])
   assert.equal((await harness.readStats()).stats!.job!.status, "failed")
   assert.deepEqual((harness.stored.get("session/s1") as SessionState).blocks, {})
