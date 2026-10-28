@@ -1,4 +1,5 @@
 import type { Block, SessionState, Unit } from "./types.ts"
+import { formatIssue, type ValidationIssue } from "./validation.ts"
 
 const formatRef = (n: number) => `m${n}`
 
@@ -70,6 +71,40 @@ const resolveEndpoint = (state: SessionState, index: Map<string, number>, spans:
   return position
 }
 
+/** Inspect all resolvable bounds without mutating state or hiding independent errors. */
+export const inspectRange = (state: SessionState, units: readonly Unit[], range: { start?: unknown; end?: unknown }) => {
+  const refs = refsOf(state, units)
+  const index = new Map(refs.flatMap((ref, i) => ref ? [[normalizeRef(ref), i] as const] : []))
+  const spans = activeSpans(state, units)
+  const errors: ValidationIssue[] = []
+  const endpoint = (id: unknown, side: "start" | "end") => {
+    if (typeof id !== "string") return undefined
+    try {
+      return resolveEndpoint(state, index, spans, id, side)
+    } catch (error) {
+      if (!(error instanceof ArchiveError)) throw error
+      errors.push({ kind: state.blocks[id.trim()] ? "unavailable-block" : "unknown-ref", side, ref: id.trim() })
+      return undefined
+    }
+  }
+  const from = endpoint(range.start, "start")
+  const to = endpoint(range.end, "end")
+  if (from !== undefined && to !== undefined) {
+    if (from > to) errors.push({ kind: "reversed-range", start: String(range.start), end: String(range.end) })
+    else {
+      for (const hit of protectedIndexes(units)) {
+        if (from <= hit && hit <= to) errors.push({ kind: "protected-message", start: String(range.start), end: String(range.end), ref: refs[hit]! })
+      }
+      for (const span of spans) {
+        const overlaps = span.indexes.some((position) => from <= position && position <= to)
+        const contains = span.indexes.every((position) => from <= position && position <= to)
+        if (overlaps && !contains) errors.push({ kind: "partial-block", start: String(range.start), end: String(range.end), block: span.block.id, blockStart: span.block.start, blockEnd: span.block.end })
+      }
+    }
+  }
+  return { from, to, errors }
+}
+
 interface ArchiveResult {
   readonly block: Block
   readonly from: number
@@ -100,30 +135,16 @@ export const archive = (
 ): ArchiveResult[] => {
   if (!ranges.length) throw new ArchiveError("Provide at least one range.")
   const refs = refsOf(state, units)
-  const index = new Map(refs.flatMap((ref, i) => ref ? [[normalizeRef(ref), i] as const] : []))
   const spans = activeSpans(state, units)
-  const guarded = protectedIndexes(units)
 
   const errors: string[] = []
   const check = (range: RangeInput) => {
-    if (!range.summary?.trim()) throw new ArchiveError(`Range ${range.start}–${range.end} has an empty summary.`)
-    const from = resolveEndpoint(state, index, spans, range.start, "start")
-    const to = resolveEndpoint(state, index, spans, range.end, "end")
-    if (from > to) throw new ArchiveError(`Range ${range.start}–${range.end} is reversed.`)
-    const hit = guarded.find((index) => from <= index && index <= to)
-    if (hit !== undefined) {
-      throw new ArchiveError(`Range ${range.start}–${range.end} includes ${refs[hit]}, the latest user message, which must stay visible.`)
-    }
-    for (const span of spans) {
-      const overlaps = span.indexes.some((index) => from <= index && index <= to)
-      const contains = span.indexes.every((index) => from <= index && index <= to)
-      if (overlaps && !contains) {
-        throw new ArchiveError(
-          `Range ${range.start}–${range.end} partially overlaps block ${span.block.id} (${span.block.start}–${span.block.end}). Widen the range to include the whole block, or start/end at ${span.block.id}.`,
-        )
-      }
-    }
-    return { range, from, to }
+    const result = inspectRange(state, units, range)
+    if (typeof range.start !== "string") result.errors.push({ kind: "field-type", field: "start" })
+    if (typeof range.end !== "string") result.errors.push({ kind: "field-type", field: "end" })
+    if (!range.summary?.trim()) result.errors.push({ kind: "empty-field", field: "summary" })
+    if (result.errors.length) throw new ArchiveError(result.errors.map(formatIssue).join("\n"))
+    return { range, from: result.from!, to: result.to! }
   }
   const resolved = ranges.flatMap((range) => {
     try {

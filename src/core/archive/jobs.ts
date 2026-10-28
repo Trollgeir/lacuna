@@ -1,8 +1,10 @@
-import { projectContext } from "../projection.ts"
+import { contextCharacters, projectContext } from "../projection.ts"
 import { archive, ArchiveError, protectedIndexes, refsOf, type RangeInput } from "../state.ts"
 import type { SessionState, Unit } from "../types.ts"
 import { archivePrompt } from "./prompt.ts"
-import { parseRanges } from "./output.ts"
+import { parseEntries } from "./output.ts"
+import { repairPrompt, stageRanges, type ArchiveGenerate } from "./selection.ts"
+import { formatValidationError } from "../validation.ts"
 import type { ArchiveJobStatus } from "./status.ts"
 import { candidates } from "./candidates.ts"
 
@@ -86,7 +88,7 @@ export class ArchiveJobs {
     state: SessionState,
     units: readonly Unit[],
     model: string,
-    generate: (prompt: string, signal: AbortSignal) => Promise<string>,
+    generate: ArchiveGenerate,
   ): string {
     if (this.job?.status === "running" || this.job?.status === "ready") {
       throw new ArchiveError(`Archive job ${this.job.id} is ${this.job.status}.`)
@@ -108,20 +110,51 @@ export class ArchiveJobs {
     const worker: Worker = { done: Promise.resolve(), signal, ...(signal.aborted ? { abortedAt: Date.now() } : {}) }
     const aborted = () => { worker.abortedAt = Date.now() }
     signal.addEventListener("abort", aborted, { once: true })
-    worker.done = Promise.resolve().then(() => {
-      if (job.controller.signal.aborted) return undefined
-      return generate(prompt, signal)
-    }).then((output) => {
+    worker.done = Promise.resolve().then(async () => {
+      if (job.controller.signal.aborted) return
+      const output = await generate(prompt, signal)
       if (job.status !== "running") return
       signal.throwIfAborted()
-      const ranges = parseRanges(output!)
-      if (!ranges.length) {
-        job.status = "skipped"
-      } else {
-        job.targets = capture(job.state, job.units, ranges)
-        job.ranges = ranges
-        job.status = "ready"
+      let ranges: RangeInput[] = []
+      let errors: string[] = []
+      let rejected = 0
+      try {
+        const entries = parseEntries(output)
+        if (!entries.length) {
+          job.status = "skipped"
+          this.changed()
+          return
+        }
+        const selection = stageRanges(job.state, job.units, ranges, entries)
+        ranges = selection.ranges
+        errors = selection.errors.map(formatValidationError)
+        rejected = selection.rejected
+      } catch (error) {
+        errors = [reason(error)]
       }
+      if (errors.length) {
+        try {
+          const retry = await generate(repairPrompt(errors, ranges), signal, [{ prompt, output }])
+          if (job.status !== "running") return
+          signal.throwIfAborted()
+          const entries = parseEntries(retry)
+          const selection = stageRanges(job.state, job.units, ranges, entries)
+          const replacements = selection.ranges.length - ranges.length
+          ranges = selection.ranges
+          const missing = Math.max(0, rejected - entries.length)
+          errors = [...selection.errors.map(formatValidationError), ...(missing ? [`${missing} rejected entry/entries were not resubmitted.`] : [])]
+          if (!replacements && !entries.length) errors.push("The repair returned no replacements for the invalid archive response.")
+        } catch (error) {
+          signal.throwIfAborted()
+          if (job.status !== "running") return
+          errors = [reason(error)]
+        }
+      }
+      if (!ranges.length) throw new ArchiveError(errors.join("\n") || "No valid archive ranges remained after repair.")
+      job.targets = capture(job.state, job.units, ranges)
+      job.ranges = ranges
+      job.status = "ready"
+      if (errors.length) job.detail = `Partial success: ${ranges.length} accepted range(s); rejected material remains visible. ${errors.join(" ")}`
       this.changed()
     }).catch((error: unknown) => {
       if (job.status !== "running") return
@@ -175,7 +208,7 @@ export class ArchiveJobs {
       archive(candidate, units, job.ranges.map((range, i) => ({
         ...range, start: job.targets[i]!.start, end: job.targets[i]!.end,
       })))
-      if (projectContext(candidate, units).tokens >= projectContext(state, units).tokens) {
+      if (contextCharacters(candidate, units) >= contextCharacters(state, units)) {
         throw new ArchiveError("The summaries did not reduce context size.")
       }
       return candidate

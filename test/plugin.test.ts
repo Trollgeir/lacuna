@@ -501,6 +501,34 @@ test("compaction and deletion discard only their session's background job", asyn
   assert.deepEqual(await harness.readStats(), {}, "late callbacks cannot revive a deleted session")
 })
 
+test("archive repair appends feedback without changing the captured prefix or main session", async (t) => {
+  const harness = await setup({ archiveAt: 1e9, archiveModel: { model: "other/team/luna#fast" } })
+  t.after(harness.cleanup)
+  const main = await harness.hook("context")
+  await harness.invoke("archive", {})
+  await setImmediate()
+  const invalid = '[{"start":"m1","end":"m2","summary":"Config is valid."}]}'
+  harness.generation.resolve(invalid)
+  await setImmediate()
+  const first = harness.requests[0]!
+  const retry = harness.requests[1]!
+  assert.deepEqual(retry.messages.slice(0, first.messages.length), first.messages)
+  assert.deepEqual(retry.messages[first.messages.length], Message.assistant(invalid))
+  assert.equal(retry.messages.length, first.messages.length + 2)
+  assert.match(String(retry.messages.at(-1)!.content[0]!.text), /failed validation/)
+  assert.deepEqual(retry.system, first.system)
+  assert.deepEqual(retry.tools, first.tools)
+  assert.deepEqual(retry.options, first.options)
+  assert.deepEqual(retry.model, first.model)
+  assert.deepEqual(first.messages.slice(0, -1), main.messages)
+  harness.generations[1]!.resolve('[{"start":"m1","end":"m2","summary":"Config is valid."}]')
+  await setImmediate()
+  const stats = (await harness.readStats()).stats!
+  assert.equal(stats.job!.status, "ready")
+  assert.equal(stats.archived, 0)
+  assert.deepEqual(harness.removed, harness.created)
+})
+
 test("archive forks preserve host Message prototypes, provider metadata and binary media", async (t) => {
   const harness = await setup()
   t.after(harness.cleanup)
