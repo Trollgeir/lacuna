@@ -1,4 +1,6 @@
 import { ArchiveError, type RangeInput } from "../state.ts"
+import { parseJson } from "../json.ts"
+import { formatIssue, type ValidationIssue } from "../validation.ts"
 
 export const outputSchema = {
   type: "array",
@@ -15,26 +17,42 @@ export const outputSchema = {
   },
 } as const
 
-const validRange = (value: unknown): value is RangeInput => {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false
+export const entryErrors = (value: unknown): ValidationIssue[] => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return [{ kind: "expected-object" }]
   const range = value as Record<string, unknown>
   const { properties, required, additionalProperties } = outputSchema.items
-  if (required.some((key) => !Object.hasOwn(range, key))) return false
-  if (!additionalProperties && Object.keys(range).some((key) => !Object.hasOwn(properties, key))) return false
-  return Object.entries(properties).every(([key, field]) => {
-    if (!Object.hasOwn(range, key)) return true
+  const errors: ValidationIssue[] = []
+  for (const key of required) {
+    if (!Object.hasOwn(range, key)) errors.push({ kind: "missing-field", field: key })
+  }
+  if (!additionalProperties) {
+    for (const key of Object.keys(range)) {
+      if (!Object.hasOwn(properties, key)) errors.push({ kind: "unexpected-field", field: key })
+    }
+  }
+  for (const [key, field] of Object.entries(properties)) {
+    if (!Object.hasOwn(range, key)) continue
     const text = range[key]
-    if (typeof text !== field.type) return false
-    if (typeof text !== "string") return false
-    return (!("minLength" in field) || text.length >= field.minLength) &&
-      (!("pattern" in field) || new RegExp(field.pattern).test(text))
-  })
+    if (typeof text !== field.type) errors.push({ kind: "field-type", field: key })
+    else if (typeof text === "string" && (("minLength" in field && text.length < field.minLength) ||
+      ("pattern" in field && !new RegExp(field.pattern).test(text)))) errors.push({ kind: "empty-field", field: key })
+  }
+  return errors
 }
 
-export const parseRanges = (output: string): RangeInput[] => {
-  const ranges: unknown = JSON.parse(output)
-  if (!Array.isArray(ranges) || !ranges.every(validRange)) {
-    throw new ArchiveError("Expected an array of ranges with start, end, summary, and optional topic.")
-  }
-  return ranges.map((range) => ({ ...range, summary: range.summary.trim() }))
+export const parseEntries = (output: string): unknown[] => {
+  const result = parseJson(output)
+  if (!result.ok) throw new ArchiveError(result.error)
+  const ranges = result.value
+  if (!Array.isArray(ranges)) throw new ArchiveError("Expected a JSON array of archive ranges.")
+  return ranges
 }
+
+export const validateEntry = (value: unknown, index: number): RangeInput => {
+  const errors = entryErrors(value)
+  if (errors.length) throw new ArchiveError(`Entry ${index + 1}: ${errors.map(formatIssue).join(" ")}`)
+  const range = value as RangeInput
+  return { ...range, summary: range.summary.trim() }
+}
+
+export const parseRanges = (output: string): RangeInput[] => parseEntries(output).map(validateEntry)

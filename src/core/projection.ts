@@ -1,7 +1,11 @@
 import { activeSpans, refsOf } from "./state.ts"
 import type { Block, Msg, Part, SessionState, Unit } from "./types.ts"
+import { messagesText } from "./units.ts"
 
 const refTag = (ref: string, unit: Unit) => `<ref id="${ref}" kind="${unit.label}"/>`
+
+/** Count projected text, including archive wrappers and content that remains visible. */
+export const contextCharacters = (state: SessionState, units: readonly Unit[]): number => messagesText(projectContext(state, units).messages).length
 
 const blockText = (block: Block) => {
   const topic = block.topic ? ` topic="${block.topic.replaceAll('"', "'")}"` : ""

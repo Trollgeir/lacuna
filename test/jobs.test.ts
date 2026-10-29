@@ -2,8 +2,9 @@ import assert from "node:assert/strict"
 import { setImmediate } from "node:timers/promises"
 import { test } from "node:test"
 import { ArchiveJobs } from "../src/core/archive/jobs.ts"
-import { projectContext } from "../src/core/projection.ts"
-import { assignRefs } from "../src/core/state.ts"
+import { stageRanges } from "../src/core/archive/selection.ts"
+import { contextCharacters, projectContext } from "../src/core/projection.ts"
+import { archive, assignRefs } from "../src/core/state.ts"
 import { emptyState, type Msg } from "../src/core/types.ts"
 import { groupUnits } from "../src/core/units.ts"
 
@@ -114,7 +115,8 @@ test("validates worker-selected ranges and rejects duplicate pending jobs", asyn
 })
 
 test("batches worker-selected summaries in order", async () => {
-  const { state, units, jobs } = setup()
+  const { state, units: original, jobs } = setup()
+  const units = original.map((unit) => ({ ...unit, tokens: 0 }))
   jobs.start(state, units, model, async () => JSON.stringify([
     { ...range, end: "m2" }, { start: "m3", end: "m3", summary: "Config is valid.", topic: "conclusion" },
   ]))
@@ -123,14 +125,22 @@ test("batches worker-selected summaries in order", async () => {
   assert.equal(candidate.blocks.b1!.end, "m2")
   assert.equal(candidate.blocks.b2!.start, "m3")
   assert.equal(candidate.blocks.b2!.topic, "conclusion")
+  assert.ok(contextCharacters(candidate, units) < contextCharacters(state, units))
+  assert.ok(projectContext(candidate, units).tokens > projectContext(state, units).tokens, "size validation uses characters, not token estimates")
 })
 
 test("invalid summaries keep originals and allow retry", async () => {
   for (const invalid of ["not JSON", '[""]', '[42]', '[{}]', output(" "), JSON.stringify([{ ...range, extra: true }])]) {
     const { state, units, jobs } = setup()
-    jobs.start(state, units, model, async () => invalid)
+    let calls = 0
+    jobs.start(state, units, model, async (_prompt, _signal, history) => {
+      calls++
+      if (calls === 2) assert.equal(history![0]!.output, invalid)
+      return invalid
+    })
     await setImmediate()
     assert.match(jobs.report(), /failed/)
+    assert.equal(calls, 2, "validation gets exactly one repair attempt")
     assert.equal(jobs.apply(state, units, model), undefined)
     assert.deepEqual(state.blocks, {})
     assert.equal(jobs.start(state, units, model, async () => output()), "j2")
@@ -142,10 +152,106 @@ test("generation failures and oversized summaries keep the originals", async () 
   jobs.start(state, units, model, async () => { throw new Error("Provider unavailable") })
   await setImmediate()
   assert.match(jobs.report(), /failed.*Provider unavailable/)
-  jobs.start(state, units, model, async () => output("Verbose summary ".repeat(2000)))
+  const summary = "Verbose summary ".repeat(2000)
+  const copy = structuredClone(state)
+  archive(copy, units, [{ ...range, summary }])
+  const selected = units.slice(0, 3)
+  const percentage = contextCharacters(copy, selected) / contextCharacters(state, selected) * 100
+  const validation = stageRanges(state, units, [], [{ ...range, summary }])
+  assert.deepEqual(validation.errors, [{ entries: [0], issue: { kind: "summary-size", start: range.start, end: range.end, percentage } }])
+  jobs.start(state, units, model, async () => output(summary))
   await setImmediate()
   assert.equal(jobs.apply(state, units, model), undefined)
-  assert.match(jobs.report(), /discarded.*did not reduce/)
+  assert.match(jobs.report(), /failed.*summary size is \d+\.\d+%.*below 100%/)
+  assert.deepEqual(state.blocks, {})
+  jobs.start(state, units, model, async () => output())
+  await jobs.idle()
+  const archived = jobs.apply(state, units, model)!
+  jobs.committed()
+  jobs.start(archived, units, model, async () => JSON.stringify([{ start: "b1", end: "b1", summary: "Expanded existing summary. ".repeat(20) }]))
+  await jobs.idle()
+  assert.match(jobs.report(), /failed.*summary size is \d+\.\d+%.*below 100%/, "refolds compare against the visible summary, not the original source")
+  assert.equal(jobs.apply(archived, units, model), undefined)
+})
+
+test("stages independent summaries and retries only rejected entries, retaining partial success", async () => {
+  for (const repair of ["valid", "invalid", "malformed", "empty", "provider-error", "schema"]) {
+    const state = emptyState()
+    const units = groupUnits([
+      user("u1", "Initial discussion.\n".repeat(200)),
+      { id: "a1", role: "assistant", content: [{ type: "text", text: "Investigation.\n".repeat(200) }] },
+      { id: "a2", role: "assistant", content: [{ type: "text", text: "Conclusion.\n".repeat(200) }] },
+      user("u2", "Continue"),
+    ])
+    assignRefs(state, units)
+    const jobs = new ArchiveJobs()
+    const accepted = [
+      { start: "m1", end: "m1", summary: "Initial discussion." },
+      { start: "m2", end: "m2", summary: "Investigation." },
+    ]
+    const bad = { start: "m3", end: "m3", summary: "Bloated summary.\n".repeat(1000) }
+    let calls = 0
+    jobs.start(state, units, model, async (_prompt, _signal, history) => {
+      if (++calls === 1) return JSON.stringify([...accepted, repair === "schema" ? { ...bad, summary: 42 } : bad])
+      assert.equal(history!.length, 1)
+      assert.deepEqual(state.blocks, {}, "staging never commits")
+      if (repair === "provider-error") throw new Error("Provider unavailable")
+      return repair === "valid" || repair === "schema" ? JSON.stringify([{ ...bad, summary: "Conclusion." }])
+        : repair === "empty" ? "[]" : repair === "invalid" ? JSON.stringify([bad]) : "malformed"
+    })
+    await jobs.idle()
+    assert.equal(calls, 2)
+    const complete = repair === "valid" || repair === "schema"
+    assert.match(jobs.report(), complete ? /ready/ : /ready.*Partial success/)
+    const candidate = jobs.apply(state, units, model)!
+    assert.equal(Object.keys(candidate.blocks).length, complete ? 3 : 2)
+    if (!complete) assert.match(JSON.stringify(projectContext(candidate, units).messages), /Conclusion/)
+    assert.deepEqual(state.blocks, {})
+    jobs.committed()
+    if (!complete) assert.match(jobs.report(), /applied.*Partial success/)
+  }
+})
+
+test("repairs malformed JSON and does not retry a valid initial empty selection", async () => {
+  const { state, units, jobs } = setup()
+  let calls = 0
+  jobs.start(state, units, model, async (_prompt, _signal, history) => {
+    if (++calls === 1) return output() + "}"
+    assert.equal(history![0]!.output, output() + "}")
+    return output()
+  })
+  await jobs.idle()
+  assert.equal(calls, 2)
+  assert.equal(jobs.snapshot()!.status, "ready")
+  jobs.cancel("Next test")
+  calls = 0
+  jobs.start(state, units, model, async () => { calls++; return "[]" })
+  await jobs.idle()
+  assert.equal(calls, 1)
+  assert.equal(jobs.snapshot()!.status, "skipped")
+})
+
+test("range validation returns all independent issues as structured data", () => {
+  const { state, units } = setup()
+  const result = stageRanges(state, units, [], [
+    { start: "m99", end: "m98", summary: 42 },
+    { ...range, end: "m2", summary: "Oversized summary. ".repeat(2000), extra: true },
+    { ...range, start: "m2" },
+  ])
+  assert.deepEqual(result.errors.filter(({ issue }) => issue.kind !== "summary-size"), [
+    { entries: [0], issue: { kind: "field-type", field: "summary" } },
+    { entries: [0], issue: { kind: "unknown-ref", side: "start", ref: "m99" } },
+    { entries: [0], issue: { kind: "unknown-ref", side: "end", ref: "m98" } },
+    { entries: [1], issue: { kind: "unexpected-field", field: "extra" } },
+    { entries: [1, 2], issue: { kind: "overlap" } },
+  ])
+  const sizeErrors = result.errors.filter(({ issue }) => issue.kind === "summary-size")
+  assert.equal(sizeErrors.length, 1)
+  assert.deepEqual(sizeErrors[0]!.entries, [1])
+  const size = sizeErrors[0]!.issue
+  assert.ok(size.kind === "summary-size" && size.percentage > 100)
+  assert.equal(result.rejected, 3)
+  assert.deepEqual(result.ranges, [])
   assert.deepEqual(state.blocks, {})
 })
 

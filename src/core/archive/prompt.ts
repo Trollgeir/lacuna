@@ -10,6 +10,7 @@ Keep material still needed for the current work visible. Return an empty array i
 Keep relevant details, decisions, and unfinished work, including information from existing summaries.
 Omit repetition and material that no longer matters.
 Summaries should reduce the size of the ranges they replace while retaining relevant details.
+Each summary must be below 100% of its source size.
 
 Use the m# and b# IDs shown in context as inclusive range endpoints. Ranges must not overlap;
 include existing blocks whole.

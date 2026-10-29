@@ -1,4 +1,6 @@
 import type { Model, Plugin } from "@opencode/plugin"
+import { Message } from "@opencode/ai/effect"
+import type { ArchiveFeedback } from "../../core/archive/selection.ts"
 import { ArchiveError } from "../../core/state.ts"
 import { forkRequest, modelKey, type ModelContext } from "./host.ts"
 import type { Options } from "./options.ts"
@@ -37,10 +39,14 @@ export const archiveExecution = async (
       const request = forkRequest(primary)
       const ownerID = request.sessionID
       const marker = `<lacuna-job id="${crypto.randomUUID()}"/>`
-      return async (instructions: string, signal: AbortSignal): Promise<string> => {
+      return async (instructions: string, signal: AbortSignal, history: readonly ArchiveFeedback[] = []): Promise<string> => {
         if (disposed) throw new ArchiveError("Lacuna has unloaded.")
         signal.throwIfAborted()
         const prompt = `${marker}\n${instructions}`
+        const captured = { ...request, messages: [...request.messages, ...history.flatMap((turn) => [
+          Message.user(`${marker}\n${turn.prompt}`),
+          Message.assistant(turn.output),
+        ])] }
         let temporaryID: string | undefined
         try {
           const model = config?.model ?? request.model
@@ -52,7 +58,7 @@ export const archiveExecution = async (
               throw new ArchiveError(`archiveModel variant ${model.variant} is not registered for ${model.providerID}/${model.id}.`)
             }
             const factor = await factorFor(`${model.providerID}/${model.id}`)
-            const estimate = Math.ceil(JSON.stringify({ system: request.system, messages: request.messages, tools: request.tools, prompt }).length / 4 * factor)
+            const estimate = Math.ceil(JSON.stringify({ system: captured.system, messages: captured.messages, tools: captured.tools, prompt }).length / 4 * factor)
             const output = config.options.maxTokens ?? (config.model ? undefined : request.options.maxTokens) ?? selected.limit.output
             if (output > selected.limit.output) {
               throw new ArchiveError(`archiveModel.options.maxTokens exceeds ${model.providerID}/${model.id}'s output limit of ${selected.limit.output}.`)
@@ -69,7 +75,7 @@ export const archiveExecution = async (
           }
           signal.throwIfAborted()
           const sessionID = temporaryID ?? ownerID
-          forks.set(prompt, { sessionID, ownerID, request, model })
+          forks.set(prompt, { sessionID, ownerID, request: captured, model })
           const result = await ctx.session.generate({ sessionID, prompt }, { signal })
           return result.text
         } finally {

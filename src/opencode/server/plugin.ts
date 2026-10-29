@@ -288,10 +288,10 @@ export default Plugin.define({
       const generate = execution.capture(view.request)
       // A replacement must not overlap a cancelled worker that is still stopping.
       const previous = options.archiveMode === "blocking" ? job.idle() : undefined
-      job.start(state, view.units, modelKey(view.request.model), async (instructions, signal) => {
+      job.start(state, view.units, modelKey(view.request.model), async (instructions, signal, history) => {
         await previous
         signal.throwIfAborted()
-        return generate(instructions, signal)
+        return generate(instructions, signal, history)
       })
       if (explicit) trigger.recordAttempt(tokens)
       return "Archive job started."

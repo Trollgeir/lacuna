@@ -40,6 +40,13 @@ const partText = (part: Part): string => {
 
 const partTokens = (part: Part) => (part.type === "media" ? MEDIA_TOKENS : estimateTokens(partText(part).length))
 
+/** Provider-independent text representation, shared by size checks and unit previews. */
+export const messagesText = (messages: readonly Msg[]): string => messages
+  .flatMap((message) => message.content)
+  .map(partText)
+  .filter(Boolean)
+  .join("\n")
+
 const messageTokens = (message: Msg) => message.content.reduce((sum, part) => sum + partTokens(part), 4)
 
 const unitKey = (message: Msg) => {
@@ -68,11 +75,7 @@ const makeUnit = (key: string | undefined, role: Unit["role"], messages: Msg[]):
   messages,
   tokens: messages.reduce((sum, message) => sum + messageTokens(message), 0),
   label: labelFor(role, messages),
-  text: messages
-    .flatMap((message) => message.content)
-    .map(partText)
-    .filter(Boolean)
-    .join("\n"),
+  text: messagesText(messages),
 })
 
 export const groupUnits = (messages: readonly Msg[]): Unit[] => {
