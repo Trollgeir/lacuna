@@ -63,6 +63,26 @@ export const stageRanges = (state: SessionState, units: readonly Unit[], staged:
   return { ranges, errors, rejected: entries.length - (ranges.length - staged.length) }
 }
 
+/** Report original source spans not fully covered, regardless of repair splitting or merging. */
+export const uncoveredSources = (state: SessionState, units: readonly Unit[], entries: readonly unknown[], ranges: readonly RangeInput[]) => {
+  const covered = ranges.length ? archive(structuredClone(state), units, ranges).sort((a, b) => a.from - b.from) : []
+  return entries.flatMap((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return []
+    const bounds = inspectRange(state, units, entry)
+    // Unresolvable endpoints do not identify source material whose coverage can be measured.
+    if (bounds.from === undefined || bounds.to === undefined) return []
+    const from = Math.min(bounds.from, bounds.to)
+    const to = Math.max(bounds.from, bounds.to)
+    let next = from
+    for (const span of covered) {
+      if (span.from > next) break
+      if (span.to >= next) next = span.to + 1
+      if (next > to) return []
+    }
+    return [{ from, to }]
+  })
+}
+
 export interface ArchiveFeedback {
   readonly prompt: string
   readonly output: string

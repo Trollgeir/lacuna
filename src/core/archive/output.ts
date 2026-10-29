@@ -1,6 +1,6 @@
-import { ArchiveError, type RangeInput } from "../state.ts"
+import { ArchiveError } from "../state.ts"
 import { parseJson } from "../json.ts"
-import { formatIssue, type ValidationIssue } from "../validation.ts"
+import type { ValidationIssue } from "../validation.ts"
 
 export const outputSchema = {
   type: "array",
@@ -47,12 +47,3 @@ export const parseEntries = (output: string): unknown[] => {
   if (!Array.isArray(ranges)) throw new ArchiveError("Expected a JSON array of archive ranges.")
   return ranges
 }
-
-export const validateEntry = (value: unknown, index: number): RangeInput => {
-  const errors = entryErrors(value)
-  if (errors.length) throw new ArchiveError(`Entry ${index + 1}: ${errors.map(formatIssue).join(" ")}`)
-  const range = value as RangeInput
-  return { ...range, summary: range.summary.trim() }
-}
-
-export const parseRanges = (output: string): RangeInput[] => parseEntries(output).map(validateEntry)

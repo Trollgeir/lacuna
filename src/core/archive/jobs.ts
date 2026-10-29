@@ -3,7 +3,7 @@ import { archive, ArchiveError, protectedIndexes, refsOf, type RangeInput } from
 import type { SessionState, Unit } from "../types.ts"
 import { archivePrompt } from "./prompt.ts"
 import { parseEntries } from "./output.ts"
-import { repairPrompt, stageRanges, type ArchiveGenerate } from "./selection.ts"
+import { repairPrompt, stageRanges, uncoveredSources, type ArchiveGenerate } from "./selection.ts"
 import { formatValidationError } from "../validation.ts"
 import type { ArchiveJobStatus } from "./status.ts"
 import { candidates } from "./candidates.ts"
@@ -117,18 +117,22 @@ export class ArchiveJobs {
       signal.throwIfAborted()
       let ranges: RangeInput[] = []
       let errors: string[] = []
-      let rejected = 0
-      try {
+      let originalEntries: unknown[] = []
+      const validate = (output: string, staged: readonly RangeInput[]) => {
         const entries = parseEntries(output)
-        if (!entries.length) {
+        const selection = stageRanges(job.state, job.units, staged, entries)
+        return { entries, ranges: selection.ranges, errors: selection.errors.map(formatValidationError) }
+      }
+      try {
+        const selection = validate(output, [])
+        originalEntries = selection.entries
+        if (!originalEntries.length) {
           job.status = "skipped"
           this.changed()
           return
         }
-        const selection = stageRanges(job.state, job.units, ranges, entries)
         ranges = selection.ranges
-        errors = selection.errors.map(formatValidationError)
-        rejected = selection.rejected
+        errors = selection.errors
       } catch (error) {
         errors = [reason(error)]
       }
@@ -137,15 +141,16 @@ export class ArchiveJobs {
           const retry = await generate(repairPrompt(errors, ranges), signal, [{ prompt, output }])
           if (job.status !== "running") return
           signal.throwIfAborted()
-          const entries = parseEntries(retry)
-          const selection = stageRanges(job.state, job.units, ranges, entries)
+          const selection = validate(retry, ranges)
           const replacements = selection.ranges.length - ranges.length
           ranges = selection.ranges
-          const missing = Math.max(0, rejected - entries.length)
-          errors = [...selection.errors.map(formatValidationError), ...(missing ? [`${missing} rejected entry/entries were not resubmitted.`] : [])]
-          if (!replacements && !entries.length) errors.push("The repair returned no replacements for the invalid archive response.")
+          const uncovered = uncoveredSources(job.state, job.units, originalEntries, ranges)
+          errors = [...selection.errors, ...(uncovered.length ? [`${uncovered.length} original source range(s) remain partly or wholly visible.`] : [])]
+          if (!replacements && !selection.entries.length) errors.push("The repair returned no replacements for the invalid archive response.")
         } catch (error) {
-          signal.throwIfAborted()
+          // A deadline stops inference, not independently valid staging. Explicit cancellation
+          // still discards the job (including on source changes, compaction, or deletion).
+          job.controller.signal.throwIfAborted()
           if (job.status !== "running") return
           errors = [reason(error)]
         }

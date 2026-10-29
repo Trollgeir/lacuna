@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { setImmediate } from "node:timers/promises"
 import { test } from "node:test"
 import { ArchiveJobs } from "../src/core/archive/jobs.ts"
-import { stageRanges } from "../src/core/archive/selection.ts"
+import { stageRanges, uncoveredSources } from "../src/core/archive/selection.ts"
 import { contextCharacters, projectContext } from "../src/core/projection.ts"
 import { archive, assignRefs } from "../src/core/state.ts"
 import { emptyState, type Msg } from "../src/core/types.ts"
@@ -174,8 +174,8 @@ test("generation failures and oversized summaries keep the originals", async () 
   assert.equal(jobs.apply(archived, units, model), undefined)
 })
 
-test("stages independent summaries and retries only rejected entries, retaining partial success", async () => {
-  for (const repair of ["valid", "invalid", "malformed", "empty", "provider-error", "schema"]) {
+test("stages independent summaries and retries only rejected entries, retaining partial success", async (t) => {
+  for (const repair of ["valid", "invalid", "malformed", "empty", "provider-error", "schema", "timeout", "cancel"]) {
     const state = emptyState()
     const units = groupUnits([
       user("u1", "Initial discussion.\n".repeat(200)),
@@ -190,17 +190,29 @@ test("stages independent summaries and retries only rejected entries, retaining 
       { start: "m2", end: "m2", summary: "Investigation." },
     ]
     const bad = { start: "m3", end: "m3", summary: "Bloated summary.\n".repeat(1000) }
+    const deadline = new AbortController()
+    const timeout = t.mock.method(AbortSignal, "timeout", () => deadline.signal)
     let calls = 0
-    jobs.start(state, units, model, async (_prompt, _signal, history) => {
+    jobs.start(state, units, model, async (_prompt, signal, history) => {
       if (++calls === 1) return JSON.stringify([...accepted, repair === "schema" ? { ...bad, summary: 42 } : bad])
       assert.equal(history!.length, 1)
       assert.deepEqual(state.blocks, {}, "staging never commits")
       if (repair === "provider-error") throw new Error("Provider unavailable")
+      if (repair === "timeout") deadline.abort(new DOMException("Timed out", "TimeoutError"))
+      if (repair === "cancel") jobs.cancel("Host compaction")
+      signal.throwIfAborted()
       return repair === "valid" || repair === "schema" ? JSON.stringify([{ ...bad, summary: "Conclusion." }])
         : repair === "empty" ? "[]" : repair === "invalid" ? JSON.stringify([bad]) : "malformed"
     })
+    timeout.mock.restore()
     await jobs.idle()
     assert.equal(calls, 2)
+    if (repair === "cancel") {
+      assert.equal(jobs.snapshot()!.status, "discarded")
+      assert.equal(jobs.apply(state, units, model), undefined)
+      assert.deepEqual(state.blocks, {})
+      continue
+    }
     const complete = repair === "valid" || repair === "schema"
     assert.match(jobs.report(), complete ? /ready/ : /ready.*Partial success/)
     const candidate = jobs.apply(state, units, model)!
@@ -231,6 +243,31 @@ test("repairs malformed JSON and does not retry a valid initial empty selection"
   assert.equal(jobs.snapshot()!.status, "skipped")
 })
 
+test("repair completeness follows source coverage when replacements split or merge", async () => {
+  for (const split of [true, false]) {
+    const state = emptyState()
+    const units = groupUnits([1, 2, 3, 4, 5].map((id) => user(`u${id}`, `Discussion ${id}.\n`.repeat(200))))
+    assignRefs(state, units)
+    const jobs = new ArchiveJobs()
+    const accepted = { start: "m1", end: "m1", summary: "First discussion." }
+    const rejected = [
+      { start: "m2", end: "m3", summary: 42 },
+      { start: "m4", end: "m4", summary: 42 },
+    ]
+    const repair = split
+      ? [{ start: "m2", end: "m2", summary: "Second discussion." }, { start: "m3", end: "m3", summary: "Third discussion." }]
+      : [{ start: "m2", end: "m4", summary: "Remaining discussions." }]
+    let calls = 0
+    jobs.start(state, units, model, async () => JSON.stringify(++calls === 1 ? [accepted, ...rejected] : repair))
+    await jobs.idle()
+    assert.equal(calls, 2)
+    assert.equal(jobs.snapshot()!.status, "ready")
+    assert.equal(jobs.snapshot()!.detail !== undefined, split)
+    const candidate = jobs.apply(state, units, model)!
+    assert.equal(JSON.stringify(projectContext(candidate, units).messages).includes("Discussion 4."), split)
+  }
+})
+
 test("range validation returns all independent issues as structured data", () => {
   const { state, units } = setup()
   const result = stageRanges(state, units, [], [
@@ -253,6 +290,11 @@ test("range validation returns all independent issues as structured data", () =>
   assert.equal(result.rejected, 3)
   assert.deepEqual(result.ranges, [])
   assert.deepEqual(state.blocks, {})
+  const sources = [{ ...range, end: "m2" }, { ...range, start: "m3" }]
+  const split = [{ ...range, end: "m1" }, { ...range, start: "m2", end: "m2" }]
+  assert.deepEqual(uncoveredSources(state, units, sources, split), [{ from: 2, to: 2 }])
+  assert.deepEqual(uncoveredSources(state, units, sources, [range]), [])
+  assert.deepEqual(uncoveredSources(state, units, sources, []), [{ from: 0, to: 1 }, { from: 2, to: 2 }])
 })
 
 test("a changed or removed source or model switch cancels a running job", async () => {
