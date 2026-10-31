@@ -117,9 +117,9 @@ test("validates worker-selected ranges and rejects duplicate pending jobs", asyn
 test("batches worker-selected summaries in order", async () => {
   const { state, units: original, jobs } = setup()
   const units = original.map((unit) => ({ ...unit, tokens: 0 }))
-  jobs.start(state, units, model, async () => `\`\`\`json\n${JSON.stringify([
+  jobs.start(state, units, model, async () => JSON.stringify([
     { ...range, end: "m2" }, { start: "m3", end: "m3", summary: "Config is valid.", topic: "conclusion" },
-  ])}\n\`\`\``)
+  ]))
   await setImmediate()
   const candidate = jobs.apply(state, units, model)!
   assert.equal(candidate.blocks.b1!.end, "m2")
