@@ -6,6 +6,9 @@ test("parses arbitrary JSON values without imposing an archive schema", () => {
   for (const value of [null, true, 42, "hello", [], { nested: [1, "two"] }]) {
     assert.deepEqual(parseJson(JSON.stringify(value)), { ok: true, value })
   }
+  for (const text of ['```json\n[1, 2]\n```', '```\n[1, 2]\n```', '  ```JSON\r\n[1, 2]\r\n```\n']) {
+    assert.deepEqual(parseJson(text), { ok: true, value: [1, 2] })
+  }
 })
 
 test("malformed JSON returns model-friendly excerpts around the fault", () => {
@@ -24,6 +27,9 @@ test("malformed JSON returns model-friendly excerpts around the fault", () => {
     assert.ok(result.error.includes(excerpt), result.error)
     assert.doesNotMatch(result.error, /at position \d+/)
   }
+  assert.deepEqual(parseJson('```json\n[1, 2,]\n```'), parseJson('[1, 2,]'))
+  assert.equal(parseJson('Before\n```json\n[]\n```').ok, false)
+  assert.equal(parseJson('```json\n[]\n```\nAfter').ok, false)
 })
 
 test("JSON feedback remains bounded for large responses and faults without a position", () => {

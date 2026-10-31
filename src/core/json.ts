@@ -1,7 +1,6 @@
 export type JsonResult = { readonly ok: true; readonly value: unknown } | { readonly ok: false; readonly error: string }
 
-/** Parse any JSON value, returning bounded, model-readable feedback for syntax errors. */
-export const parseJson = (text: string): JsonResult => {
+const parse = (text: string): JsonResult => {
   try {
     return { ok: true, value: JSON.parse(text) }
   } catch (error) {
@@ -15,4 +14,12 @@ export const parseJson = (text: string): JsonResult => {
       : `Nearby response excerpt: ${JSON.stringify(text.slice(Math.max(0, position - 60), position))} ${position === text.length ? "⟦UNEXPECTED END⟧" : "⟦ERROR HERE⟧"} ${JSON.stringify(text.slice(position, position + 60))}`
     return { ok: false, error: `Invalid JSON: ${description}. ${excerpt}` }
   }
+}
+
+/** Parse any JSON value, including a whole fenced block, with bounded feedback for syntax errors. */
+export const parseJson = (text: string): JsonResult => {
+  const result = parse(text)
+  if (result.ok) return result
+  const fenced = /^\s*```(?:json)?[ \t]*\r?\n([\s\S]*?)\r?\n```[ \t]*\s*$/i.exec(text)
+  return fenced ? parse(fenced[1]!) : result
 }
