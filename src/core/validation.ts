@@ -8,7 +8,6 @@ export type ValidationIssue =
   | { kind: "empty-source"; start: string; end: string }
   | { kind: "summary-size"; start: string; end: string; percentage: number }
   | { kind: "staged-overlap" | "overlap" }
-  | { kind: "combined-size"; percentage: number }
 
 export interface ValidationError {
   /** Zero-based indexes of the rejected entries; empty for a batch-wide issue. */
@@ -33,7 +32,6 @@ export const formatIssue = (issue: ValidationIssue): string => {
     case "summary-size": return `Range ${issue.start}–${issue.end}: summary size is ${issue.percentage.toFixed(1)}% of the source; it must be below 100%. Shorten the summary or omit this range.`
     case "staged-overlap": return "Overlaps an already accepted range. Do not resubmit accepted ranges."
     case "overlap": return "Overlap. Replace both with non-overlapping ranges."
-    case "combined-size": return `Combined summary size is ${issue.percentage.toFixed(1)}% of the previous visible context; it must be below 100%. Shorten the summaries or omit ranges.`
   }
 }
 

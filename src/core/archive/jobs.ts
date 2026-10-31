@@ -1,9 +1,9 @@
-import { contextCharacters, projectContext } from "../projection.ts"
+import { projectContext } from "../projection.ts"
 import { archive, ArchiveError, protectedIndexes, refsOf, type RangeInput } from "../state.ts"
 import type { SessionState, Unit } from "../types.ts"
 import { archivePrompt } from "./prompt.ts"
 import { parseEntries } from "./output.ts"
-import { repairPrompt, stageRanges, uncoveredSources, type ArchiveGenerate } from "./selection.ts"
+import { archivePlan, repairPrompt, stageRanges, TARGET_REDUCTION, uncoveredSources, type ArchiveGenerate } from "./selection.ts"
 import { formatValidationError } from "../validation.ts"
 import type { ArchiveJobStatus } from "./status.ts"
 import { candidates } from "./candidates.ts"
@@ -104,7 +104,6 @@ export class ArchiveJobs {
     const refs = refsOf(job.state, job.units)
     const prompt = archivePrompt({
       protectedRefs: protectedIndexes(job.units).flatMap((index) => refs[index] ? [refs[index]!] : []),
-      candidates: candidates(job.state, job.units),
     })
     const signal = AbortSignal.any([job.controller.signal, AbortSignal.timeout(300_000)])
     const worker: Worker = { done: Promise.resolve(), signal, ...(signal.aborted ? { abortedAt: Date.now() } : {}) }
@@ -126,27 +125,26 @@ export class ArchiveJobs {
       try {
         const selection = validate(output, [])
         originalEntries = selection.entries
-        if (!originalEntries.length) {
-          job.status = "skipped"
-          this.changed()
-          return
-        }
         ranges = selection.ranges
         errors = selection.errors
       } catch (error) {
         errors = [reason(error)]
       }
-      if (errors.length) {
+      const plan = archivePlan(job.state, job.units, ranges)
+      const shortfall = plan.reduction < TARGET_REDUCTION
+      if (errors.length || shortfall) {
+        const hadErrors = errors.length > 0
         try {
-          const retry = await generate(repairPrompt(errors, ranges), signal, [{ prompt, output }])
+          const suggestions = shortfall ? candidates(plan.projected, job.units) : undefined
+          const retry = await generate(repairPrompt(errors, plan, suggestions), signal, [{ prompt, output }])
           if (job.status !== "running") return
           signal.throwIfAborted()
           const selection = validate(retry, ranges)
           const replacements = selection.ranges.length - ranges.length
           ranges = selection.ranges
-          const uncovered = uncoveredSources(job.state, job.units, originalEntries, ranges)
+          const uncovered = hadErrors ? uncoveredSources(job.state, job.units, originalEntries, ranges) : []
           errors = [...selection.errors, ...(uncovered.length ? [`${uncovered.length} original source range(s) remain partly or wholly visible.`] : [])]
-          if (!replacements && !selection.entries.length) errors.push("The repair returned no replacements for the invalid archive response.")
+          if (hadErrors && !replacements && !selection.entries.length) errors.push("The repair returned no replacements for the invalid archive response.")
         } catch (error) {
           // A deadline stops inference, not independently valid staging. Explicit cancellation
           // still discards the job (including on source changes, compaction, or deletion).
@@ -155,11 +153,16 @@ export class ArchiveJobs {
           errors = [reason(error)]
         }
       }
-      if (!ranges.length) throw new ArchiveError(errors.join("\n") || "No valid archive ranges remained after repair.")
+      if (!ranges.length) {
+        if (errors.length) throw new ArchiveError(errors.join("\n"))
+        job.status = "skipped"
+        this.changed()
+        return
+      }
       job.targets = capture(job.state, job.units, ranges)
       job.ranges = ranges
       job.status = "ready"
-      if (errors.length) job.detail = `Partial success: ${ranges.length} accepted range(s); rejected material remains visible. ${errors.join(" ")}`
+      if (errors.length) job.detail = `Partial success: ${ranges.length} accepted range(s). ${errors.join(" ")}`
       this.changed()
     }).catch((error: unknown) => {
       if (job.status !== "running") return
@@ -213,9 +216,6 @@ export class ArchiveJobs {
       archive(candidate, units, job.ranges.map((range, i) => ({
         ...range, start: job.targets[i]!.start, end: job.targets[i]!.end,
       })))
-      if (contextCharacters(candidate, units) >= contextCharacters(state, units)) {
-        throw new ArchiveError("The summaries did not reduce context size.")
-      }
       return candidate
     } catch (error) {
       this.cancel(reason(error))

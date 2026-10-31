@@ -41,6 +41,7 @@ export const entryErrors = (value: unknown): ValidationIssue[] => {
 }
 
 export const parseEntries = (output: string): unknown[] => {
+  if (!output.trim()) return []
   const result = parseJson(output)
   if (!result.ok) throw new ArchiveError(result.error)
   const ranges = result.value

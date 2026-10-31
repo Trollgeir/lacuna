@@ -130,7 +130,7 @@ test("batches worker-selected summaries in order", async () => {
 })
 
 test("invalid summaries keep originals and allow retry", async () => {
-  for (const invalid of ["not JSON", '[""]', '[42]', '[{}]', output(" "), JSON.stringify([{ ...range, extra: true }])]) {
+  for (const invalid of ["not JSON", '""', '[""]', '[42]', '[{}]', output(" "), JSON.stringify([{ ...range, extra: true }])]) {
     const { state, units, jobs } = setup()
     let calls = 0
     jobs.start(state, units, model, async (_prompt, _signal, history) => {
@@ -193,9 +193,11 @@ test("stages independent summaries and retries only rejected entries, retaining 
     const deadline = new AbortController()
     const timeout = t.mock.method(AbortSignal, "timeout", () => deadline.signal)
     let calls = 0
-    jobs.start(state, units, model, async (_prompt, signal, history) => {
+    jobs.start(state, units, model, async (prompt, signal, history) => {
       if (++calls === 1) return JSON.stringify([...accepted, repair === "schema" ? { ...bad, summary: 42 } : bad])
       assert.equal(history!.length, 1)
+      assert.match(prompt, /## Archive plan[\s\S]*m1–m1[\s\S]*m2–m2/)
+      assert.doesNotMatch(prompt, /Initial discussion\.|Investigation\.|## Low context reduction/)
       assert.deepEqual(state.blocks, {}, "staging never commits")
       if (repair === "provider-error") throw new Error("Provider unavailable")
       if (repair === "timeout") deadline.abort(new DOMException("Timed out", "TimeoutError"))
@@ -224,23 +226,68 @@ test("stages independent summaries and retries only rejected entries, retaining 
   }
 })
 
-test("repairs malformed JSON and does not retry a valid initial empty selection", async () => {
+test("repairs malformed JSON and retries empty selections", async () => {
   const { state, units, jobs } = setup()
   let calls = 0
-  jobs.start(state, units, model, async (_prompt, _signal, history) => {
+  jobs.start(state, units, model, async (prompt, _signal, history) => {
     if (++calls === 1) return output() + "}"
     assert.equal(history![0]!.output, output() + "}")
+    assert.match(prompt, /^## Validation errors\n/)
+    assert.doesNotMatch(prompt, /## Archive plan/)
     return output()
   })
   await jobs.idle()
   assert.equal(calls, 2)
   assert.equal(jobs.snapshot()!.status, "ready")
   jobs.cancel("Next test")
-  calls = 0
-  jobs.start(state, units, model, async () => { calls++; return "[]" })
+  for (const empty of ["[]", ""]) {
+    calls = 0
+    jobs.start(state, units, model, async (prompt) => {
+      if (++calls === 2) assert.doesNotMatch(prompt, /## Archive plan/)
+      return empty
+    })
+    await jobs.idle()
+    assert.equal(calls, 2)
+    assert.equal(jobs.snapshot()!.status, "skipped")
+    assert.equal(jobs.apply(state, units, model), undefined)
+  }
+})
+
+test("archive plan uses a 20% target, adds only new ranges, and stops after one follow-up", async () => {
+  const state = emptyState()
+  const units = groupUnits([
+    user("u1", "First discussion. ".repeat(100)),
+    { id: "a1", role: "assistant", content: [{ type: "text", text: "Later work. ".repeat(2000) }] },
+    user("u2", "Protected"),
+  ])
+  assignRefs(state, units)
+  const first = { start: "m1", end: "m1", summary: "First discussion." }
+  const additional = { start: "m2", end: "m2", summary: "Later work." }
+  for (const followUp of ["[]", JSON.stringify([additional])]) {
+    const jobs = new ArchiveJobs()
+    let calls = 0
+    jobs.start(state, units, model, async (prompt) => {
+      if (++calls === 1) {
+        assert.doesNotMatch(prompt, /Suggested spans/)
+        return JSON.stringify([first])
+      }
+      assert.match(prompt, /## Archive plan[\s\S]*m1–m1[\s\S]*## Low context reduction:[\s\S]*target is 20%[\s\S]*m2–m2/)
+      assert.doesNotMatch(prompt.slice(prompt.indexOf("## Low context reduction:")), /m1–m1/)
+      return followUp
+    })
+    await jobs.idle()
+    assert.equal(calls, 2)
+    const candidate = jobs.apply(state, units, model)!
+    assert.equal(candidate.blocks.b1!.summary, first.summary)
+    assert.equal(Object.keys(candidate.blocks).length, followUp === "[]" ? 1 : 2)
+  }
+
+  const jobs = new ArchiveJobs()
+  let calls = 0
+  jobs.start(state, units, model, async () => { calls++; return JSON.stringify([additional]) })
   await jobs.idle()
-  assert.equal(calls, 1)
-  assert.equal(jobs.snapshot()!.status, "skipped")
+  assert.equal(calls, 1, "no follow-up when the initial reduction meets the target")
+  assert.equal(jobs.apply(state, units, model)!.blocks.b1!.summary, additional.summary)
 })
 
 test("repair completeness follows source coverage when replacements split or merge", async () => {
