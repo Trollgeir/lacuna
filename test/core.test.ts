@@ -239,8 +239,6 @@ test("candidates group role runs and include users while excluding archives and 
   const runs = candidates(state, units)
   assert.deepEqual(runs.map(({ start, end }) => [start, end]), [["m2", "m3"], ["m5", "m5"]])
   assert.ok(runs[0]!.tokens >= runs[1]!.tokens)
-  assert.equal(runs[0]!.prefixPreserved, projectContext(state, units.slice(0, 1), identity).tokens)
-  assert.equal(runs[1]!.prefixPreserved, projectContext(state, units.slice(0, 4), identity).tokens)
   const tied = units.map((unit, i) => i === 4 ? { ...unit, tokens: runs[0]!.tokens } : unit)
   assert.equal(candidates(state, tied)[0]!.start, "m5", "equal-sized candidates prefer the later range")
   const separated = { ...setup(), units }

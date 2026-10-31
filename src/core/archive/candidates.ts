@@ -1,6 +1,5 @@
 import { activeSpans, protectedIndexes, refsOf } from "../state.ts"
 import type { SessionState, Unit } from "../types.ts"
-import { projectContext } from "../projection.ts"
 
 const MIN_CANDIDATE_TOKENS = 1_000
 
@@ -8,7 +7,6 @@ export interface Candidate {
   readonly start: string
   readonly end: string
   readonly tokens: number
-  readonly prefixPreserved: number
 }
 
 /** Role-contiguous spans split by archives and protected messages, ranked by estimated size. */
@@ -20,7 +18,7 @@ export const candidates = (state: SessionState, units: readonly Unit[], limit = 
     ...protectedIndexes(units).map((index) => ({ from: index, to: index })),
     ...units.flatMap((unit, index) => unit.key ? [] : [{ from: index, to: index }]),
   ].sort((a, b) => a.from - b.from)
-  const runs: (Omit<Candidate, "prefixPreserved"> & { from: number })[] = []
+  const runs: (Candidate & { from: number })[] = []
   let from = 0
   const flush = (to: number) => {
     let start = from
@@ -38,8 +36,5 @@ export const candidates = (state: SessionState, units: readonly Unit[], limit = 
   }
   flush(units.length - 1)
   return runs.filter((range) => range.tokens >= MIN_CANDIDATE_TOKENS)
-    .sort((a, b) => b.tokens - a.tokens || b.from - a.from).slice(0, limit).map(({ from, ...range }) => ({
-      ...range,
-      prefixPreserved: projectContext(state, units.slice(0, from)).tokens,
-    }))
+    .sort((a, b) => b.tokens - a.tokens || b.from - a.from).slice(0, limit).map(({ from: _from, ...range }) => range)
 }

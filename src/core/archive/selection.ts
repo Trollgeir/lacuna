@@ -2,12 +2,15 @@ import { contextCharacters } from "../projection.ts"
 import { archive, inspectRange, type RangeInput } from "../state.ts"
 import type { SessionState, Unit } from "../types.ts"
 import { entryErrors } from "./output.ts"
+import { candidateSuggestions } from "./prompt.ts"
+import type { Candidate } from "./candidates.ts"
 import type { ValidationError } from "../validation.ts"
+
+export const TARGET_REDUCTION = 0.2
 
 /** Validate on clones, retaining independent entries without choosing winners among conflicts. */
 export const stageRanges = (state: SessionState, units: readonly Unit[], staged: readonly RangeInput[], entries: readonly unknown[]) => {
   const errors: ValidationError[] = []
-  const before = contextCharacters(state, units)
   const candidates = entries.flatMap((entry, index) => {
     const raw = entry && typeof entry === "object" && !Array.isArray(entry) ? entry as Record<string, unknown> : {}
     const issues = entryErrors(entry)
@@ -25,7 +28,7 @@ export const stageRanges = (state: SessionState, units: readonly Unit[], staged:
       const source = contextCharacters(state, selected)
       const replacement = contextCharacters(copy, selected)
       if (!source) issues.push({ kind: "empty-source", start: range.start, end: range.end })
-      else if (replacement >= source || contextCharacters(copy, units) >= before) {
+      else if (replacement >= source) {
         issues.push({ kind: "summary-size", start: range.start, end: range.end, percentage: replacement / source * 100 })
       }
     }
@@ -50,17 +53,16 @@ export const stageRanges = (state: SessionState, units: readonly Unit[], staged:
     }
   }
   const ranges = [...staged, ...candidates.flatMap((candidate) => candidate.valid && !conflicts.has(candidate.index) ? [candidate.range!] : [])]
-  // Recheck together: wrappers and nested blocks must be valid in the combined result too.
-  if (ranges.length) {
-    const copy = structuredClone(state)
-    archive(copy, units, ranges)
-    const after = contextCharacters(copy, units)
-    if (after >= before) {
-      errors.push({ entries: [], issue: { kind: "combined-size", percentage: before > 0 ? after / before * 100 : 100 } })
-      ranges.splice(staged.length)
-    }
-  }
   return { ranges, errors, rejected: entries.length - (ranges.length - staged.length) }
+}
+
+/** Measure the entire projected context and expose the staged state for candidate generation. */
+export const archivePlan = (state: SessionState, units: readonly Unit[], ranges: readonly RangeInput[]) => {
+  const projected = structuredClone(state)
+  if (ranges.length) archive(projected, units, ranges)
+  const before = contextCharacters(state, units)
+  const after = contextCharacters(projected, units)
+  return { ranges, projected, before, after, reduction: before ? (before - after) / before : 0 }
 }
 
 /** Report original source spans not fully covered, regardless of repair splitting or merging. */
@@ -90,8 +92,20 @@ export interface ArchiveFeedback {
 
 export type ArchiveGenerate = (prompt: string, signal: AbortSignal, history?: readonly ArchiveFeedback[]) => Promise<string>
 
-export const repairPrompt = (errors: readonly string[], staged: readonly RangeInput[]): string => `Your previous archive response failed validation:
-${errors.map((error) => `- ${error}`).join("\n")}
+/** Render accepted entries independently of the reason for the follow-up. */
+export const formatArchivePlan = (ranges: readonly RangeInput[]): string => {
+  if (!ranges.length) return ""
+  const entries = ranges.map((range) => `- ${range.start}–${range.end}${range.topic ? `: ${range.topic}` : ""}`).join("\n")
+  return `## Archive plan\n\n${entries}\n\nThese entries do not need to be reapplied.`
+}
 
-${staged.length ? `These ranges are already accepted and staged: ${staged.map((range) => `${range.start}–${range.end}`).join(", ")}. Do not repeat their summaries. This response is a patch: return ONLY replacements for rejected entries. You may omit any rejected entries to leave their source visible. Return [] to omit all rejected entries; the already accepted ranges will still be applied.` : "Return the complete corrected archive selection."}
-Return a bare JSON array matching the original schema, without commentary or Markdown fences. Each summary must be below 100% of its source size. Do not overlap accepted ranges or other replacements. Nothing has been applied yet.`
+export const repairPrompt = (errors: readonly string[], plan: ReturnType<typeof archivePlan>, suggestions?: readonly Candidate[]): string => {
+  const sections = [formatArchivePlan(plan.ranges)]
+  if (errors.length) sections.push(`## Validation errors\n\n${errors.map((error) => `- ${error}`).join("\n")}`)
+  if (suggestions !== undefined) {
+    const hints = suggestions.length ? candidateSuggestions(suggestions) : "\n\nNo candidate suggestions were found; you may choose other eligible ranges."
+    sections.push(`## Low context reduction:\n\nThe archive plan currently only reduces context by approximately ${(plan.reduction * 100).toFixed(2)}%. The target is ${TARGET_REDUCTION * 100}%; consider archiving more.\n\nHere are some hints:${hints}`)
+  }
+  sections.push("## Output\n\nReturn ONLY new non-overlapping ranges that are not already defined in our current archive plan in the same json schema.")
+  return sections.filter(Boolean).join("\n\n")
+}

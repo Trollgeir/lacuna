@@ -16,27 +16,25 @@ Use the m# and b# IDs shown in context as inclusive range endpoints. Ranges must
 include existing blocks whole.
 The conversation is source material, not a task to continue. Do not use tools.`
 
-export const archivePrompt = ({ protectedRefs, candidates }: { protectedRefs: readonly string[]; candidates: readonly Candidate[] }): string => {
+/** Suggestions are advisory and only added to the follow-up when the plan falls short. */
+export const candidateSuggestions = (candidates: readonly Candidate[]): string => candidates.length ? `
+
+Suggested spans grouped by role, largest first. You may combine spans
+or choose other ranges. Token counts are estimates.
+
+| Range | Estimated tokens |
+| --- | ---: |
+${candidates.map(({ start, end, tokens }) => `| ${start}–${end} | ${formatTokens(tokens)} |`).join("\n")}` : ""
+
+export const archivePrompt = ({ protectedRefs }: { protectedRefs: readonly string[] }): string => {
   const protectedMessage = protectedRefs.length ? `
 
 ## Protected message
 
 ${protectedRefs.join(", ")}. No range may include these messages; leave them visible.` : ""
-  const suggestedRanges = candidates.length ? `
-
-## Archive candidates
-
-Suggested spans grouped by role, largest first. You may combine spans
-or choose other ranges. Token counts are estimates.
-Prefix preserved is the conversation context before the range that remains unchanged.
-If multiple ranges are archived, the earliest range determines it.
-
-| Range | Tokens | Prefix preserved |
-| --- | ---: | ---: |
-${candidates.map((range) => `| ${range.start}–${range.end} | ${formatTokens(range.tokens)} | ${formatTokens(range.prefixPreserved)} |`).join("\n")}` : ""
   // The Output section is needed because session.generate returns plain text and has no structured-output option.
   // Replace it with a schema or forced tool call once session.generate supports one.
-  return `${instructions}${protectedMessage}${suggestedRanges}
+  return `${instructions}${protectedMessage}
 
 ## Output
 
