@@ -27,18 +27,27 @@ export const stripAll = (incoming: readonly Msg[], make: MakeMessage) =>
 
 export const forkRequest = (request: ModelContext): ModelContext => {
   // Assets have private caches and methods: structuredClone alone would destroy them.
-  const messages = request.messages.map((message) => new Message({
-    ...structuredClone({ ...message, content: [] }),
-    content: message.content.map((part) => part.type === "media" ? {
-      ...structuredClone({ ...part, media: undefined }),
-      media: new Media.Asset({
-        source: structuredClone(part.media.source),
-        info: structuredClone(part.media.info),
-        providerMetadata: structuredClone(part.media.providerMetadata),
-        headers: structuredClone(part.media.headers),
+  const messages = request.messages.map((message) => {
+    // Host and plugin can load distinct copies of @opencode/ai. Each validates
+    // Media.Asset by identity, so preserve the constructors from the host.
+    const MessageCtor = message.constructor === Object ? Message : message.constructor as typeof Message
+    return new MessageCtor({
+      ...structuredClone({ ...message, content: [] }),
+      content: message.content.map((part) => {
+        if (part.type !== "media") return structuredClone(part)
+        const AssetCtor = part.media.constructor as typeof Media.Asset
+        return {
+          ...structuredClone({ ...part, media: undefined }),
+          media: new AssetCtor({
+            source: structuredClone(part.media.source),
+            info: structuredClone(part.media.info),
+            providerMetadata: structuredClone(part.media.providerMetadata),
+            headers: structuredClone(part.media.headers),
+          }),
+        }
       }),
-    } : structuredClone(part)),
-  }))
+    })
+  })
   return {
     ...request,
     model: { ...request.model },

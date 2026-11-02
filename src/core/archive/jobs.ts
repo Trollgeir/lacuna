@@ -47,9 +47,12 @@ interface Target {
 
 const capture = (state: SessionState, units: readonly Unit[], ranges: readonly RangeInput[]): Target[] => {
   const copy = structuredClone(state)
-  const resolved = archive(copy, units, ranges)
+  // Compare plain snapshots on both sides: host media objects serialize differently
+  // from their structured clones even when their contents are unchanged.
+  const snapshot = structuredClone(units) as Unit[]
+  const resolved = archive(copy, snapshot, ranges)
   return resolved.map(({ block, from, to }) => {
-    const selected = units.slice(from, to + 1)
+    const selected = snapshot.slice(from, to + 1)
     const children = block.children.map((id) => state.blocks[id])
     return {
       start: block.start,
@@ -63,7 +66,6 @@ const capture = (state: SessionState, units: readonly Unit[], ranges: readonly R
 /** One job per session. The worker selects ranges; only apply crosses the archive-state seam. */
 export class ArchiveJobs {
   private readonly onChange: (job: ArchiveJobStatus) => void
-
   constructor(onChange: (job: ArchiveJobStatus) => void = () => {}) {
     this.onChange = onChange
   }
@@ -193,7 +195,7 @@ export class ArchiveJobs {
     try {
       if (model !== job.model) throw new ArchiveError("The model changed.")
       if (job.status === "running") {
-        const current = units.slice(0, job.units.length)
+        const current = structuredClone(units.slice(0, job.units.length))
         if (JSON.stringify(current) !== JSON.stringify(job.units) ||
           JSON.stringify(state.blocks) !== JSON.stringify(job.state.blocks)) {
           throw new ArchiveError("The captured material changed.")

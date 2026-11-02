@@ -7,6 +7,7 @@ import { contextCharacters, projectContext } from "../src/core/projection.ts"
 import { archive, assignRefs } from "../src/core/state.ts"
 import { emptyState, type Msg } from "../src/core/types.ts"
 import { groupUnits } from "../src/core/units.ts"
+import { Media } from "@opencode/ai/effect"
 
 const model = "provider/model"
 const user = (id: string, text: string): Msg => ({ id, role: "user", content: [{ type: "text", text }] })
@@ -30,6 +31,21 @@ const deferred = () => {
 }
 const range = { start: "m1", end: "m3", topic: "config", summary: "Config /config.ts: port 8080, flag zebra." }
 const output = (summary = range.summary) => JSON.stringify([{ ...range, summary }])
+
+test("an unchanged image attachment does not invalidate a running archive", async () => {
+  const state = emptyState()
+  const image = new Media.Asset({ source: { type: "bytes", mediaType: "image/png", data: new Uint8Array([1, 2, 3]) } })
+  const units = groupUnits([user("u1", "Start"), { id: "u2", role: "user", content: [{ type: "media", media: image }] }, user("u3", "Latest")])
+  assignRefs(state, units)
+  const jobs = new ArchiveJobs()
+  const generation = deferred()
+  jobs.start(state, units, model, () => generation.promise)
+  jobs.check(state, units, model)
+  assert.equal(jobs.snapshot()?.status, "running")
+  jobs.cancel("test cleanup")
+  generation.resolve("[]")
+  await jobs.idle()
+})
 
 test("idle includes superseded workers and rejects cancellation that does not stop them", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "Date"] })

@@ -534,11 +534,12 @@ test("archive repair appends feedback without changing the captured prefix or ma
 })
 
 test("archive forks preserve host Message prototypes, provider metadata and binary media", async (t) => {
+  class HostAsset extends Media.Asset {}
   const harness = await setup()
   t.after(harness.cleanup)
   const main = await harness.hook("context", transcript().map((message) => new Message(message as ConstructorParameters<typeof Message>[0])))
   const media = new Message({ role: "user", providerMetadata: { openai: { itemID: "cached-item" } }, content: [
-    { type: "media", media: new Media.Asset({ source: { type: "bytes", mediaType: "image/png", data: new Uint8Array([1, 2, 3]) } }) },
+    { type: "media", media: new HostAsset({ source: { type: "bytes", mediaType: "image/png", data: new Uint8Array([1, 2, 3]) } }) },
   ] })
   main.messages.push(media)
   main.system.push({ type: "text", text: "Extra primary instructions" })
@@ -554,6 +555,8 @@ test("archive forks preserve host Message prototypes, provider metadata and bina
   assert.notEqual(clonedMedia.media.source.data, original.media.source.data)
   const clonedAsset = (fork.messages.at(-2) as Message).content[0]!
   assert.ok(clonedAsset.type === "media")
+  assert.ok(clonedAsset.media instanceof HostAsset)
+  assert.notEqual(clonedAsset.media, original.media)
   assert.equal(clonedAsset.media.inline()!.base64, original.media.inline()!.base64)
   assert.deepEqual(fork.messages.at(-2)!.providerMetadata, media.providerMetadata)
   harness.generation.resolve(output)
