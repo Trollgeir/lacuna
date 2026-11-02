@@ -7,6 +7,7 @@ import { contextCharacters, projectContext } from "../src/core/projection.ts"
 import { archive, assignRefs } from "../src/core/state.ts"
 import { emptyState, type Msg } from "../src/core/types.ts"
 import { groupUnits } from "../src/core/units.ts"
+import { Media } from "@opencode/ai/effect"
 
 const model = "provider/model"
 const user = (id: string, text: string): Msg => ({ id, role: "user", content: [{ type: "text", text }] })
@@ -30,6 +31,62 @@ const deferred = () => {
 }
 const range = { start: "m1", end: "m3", topic: "config", summary: "Config /config.ts: port 8080, flag zebra." }
 const output = (summary = range.summary) => JSON.stringify([{ ...range, summary }])
+
+test("an unchanged image attachment does not invalidate a running archive", async () => {
+  const state = emptyState()
+  const image = new Media.Asset({ source: { type: "bytes", mediaType: "image/png", data: new Uint8Array([1, 2, 3]) } })
+  const units = groupUnits([user("u1", "Start"), { id: "u2", role: "user", content: [{ type: "media", media: image }] }, user("u3", "Latest")])
+  assignRefs(state, units)
+  const jobs = new ArchiveJobs()
+  const generation = deferred()
+  jobs.start(state, units, model, () => generation.promise)
+  jobs.check(state, units, model)
+  assert.equal(jobs.snapshot()?.status, "running")
+  jobs.cancel("test cleanup")
+  generation.resolve("[]")
+  await jobs.idle()
+})
+
+test("generation failures preserve the original error for diagnostics and show the file path", async () => {
+  const { state, units } = setup()
+  const failure = new Error("Schema validation failed", { cause: new Error("nested cause") })
+  let captured: unknown
+  const jobs = new ArchiveJobs(() => {}, async (diagnostic) => {
+    captured = diagnostic
+    return "/private/lacuna/diagnostic.json"
+  })
+  jobs.start(state, units, model, async () => { throw failure })
+  await jobs.idle()
+  assert.deepEqual(captured, { jobID: "j1", model, error: failure, outputAvailable: false })
+  assert.match(jobs.report(), /diagnostic: \/private\/lacuna\/diagnostic\.json/)
+  assert.deepEqual(state.blocks, {})
+})
+
+test("diagnostics record output availability after the repair also fails", async () => {
+  const { state, units } = setup()
+  const captured: { outputAvailable: boolean; error: unknown }[] = []
+  const jobs = new ArchiveJobs(() => {}, async (diagnostic) => {
+    captured.push(diagnostic)
+    return "/private/diagnostic.json"
+  })
+  let attempt = 0
+  jobs.start(state, units, model, async () => ++attempt === 1 ? "bad initial JSON" : "bad repair JSON")
+  await jobs.idle()
+  assert.equal(attempt, 2)
+  assert.equal(captured[0]?.outputAvailable, true)
+  assert.ok(captured[0]?.error instanceof Error)
+  assert.match(jobs.report(), /diagnostic: \/private\/diagnostic\.json/)
+  assert.deepEqual(state.blocks, {})
+})
+
+test("diagnostic write failure does not hide the archive error", async () => {
+  const { state, units } = setup()
+  const jobs = new ArchiveJobs(() => {}, async () => { throw new Error("disk unavailable") })
+  jobs.start(state, units, model, async () => { throw new Error("generation failed") })
+  await jobs.idle()
+  assert.match(jobs.report(), /generation failed/)
+  assert.doesNotMatch(jobs.report(), /disk unavailable/)
+})
 
 test("idle includes superseded workers and rejects cancellation that does not stop them", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "Date"] })

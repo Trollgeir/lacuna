@@ -14,6 +14,7 @@ import { registerTools } from "./tools.ts"
 import { makerFor, modelKey, stripAll, type ModelContext } from "./host.ts"
 import { readOptions } from "./options.ts"
 import { archiveExecution } from "./archive.ts"
+import { writeDiagnostic } from "./diagnostics.ts"
 
 interface Live {
   units: Unit[]
@@ -184,7 +185,7 @@ export default Plugin.define({
       // UI-only events: no synthetic messages, attention notifications, or agent continuation.
       session.job = new ArchiveJobs(() => {
         if (sessions.get(sessionID) === session) publish(sessionID)
-      })
+      }, writeDiagnostic)
       return session.job
     }
     // Recompute token savings after context changes; job transitions publish independently.

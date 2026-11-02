@@ -72,6 +72,8 @@ By default, archiving runs in the background using the main model and its settin
 Use `"blocking"` for local models when running the main agent and archiving concurrently would strain GPU memory or compute.
 `archiveModel.options` accepts generation settings such as `maxTokens`, `temperature`, and provider-specific options like `reasoningEffort`.
 
+Failed archive jobs write diagnostics under `$XDG_STATE_HOME/lacuna/diagnostics` (or `~/.local/state/lacuna/diagnostics`). The job status shows the file path. Diagnostics omit model output and error details that could contain conversation data.
+
 Don't run another context pruning plugin at the same time: two plugins rewriting the same messages will conflict.
 
 ## Develop
