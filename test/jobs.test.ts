@@ -47,47 +47,6 @@ test("an unchanged image attachment does not invalidate a running archive", asyn
   await jobs.idle()
 })
 
-test("generation failures preserve the original error for diagnostics and show the file path", async () => {
-  const { state, units } = setup()
-  const failure = new Error("Schema validation failed", { cause: new Error("nested cause") })
-  let captured: unknown
-  const jobs = new ArchiveJobs(() => {}, async (diagnostic) => {
-    captured = diagnostic
-    return "/private/lacuna/diagnostic.json"
-  })
-  jobs.start(state, units, model, async () => { throw failure })
-  await jobs.idle()
-  assert.deepEqual(captured, { jobID: "j1", model, error: failure, outputAvailable: false })
-  assert.match(jobs.report(), /diagnostic: \/private\/lacuna\/diagnostic\.json/)
-  assert.deepEqual(state.blocks, {})
-})
-
-test("diagnostics record output availability after the repair also fails", async () => {
-  const { state, units } = setup()
-  const captured: { outputAvailable: boolean; error: unknown }[] = []
-  const jobs = new ArchiveJobs(() => {}, async (diagnostic) => {
-    captured.push(diagnostic)
-    return "/private/diagnostic.json"
-  })
-  let attempt = 0
-  jobs.start(state, units, model, async () => ++attempt === 1 ? "bad initial JSON" : "bad repair JSON")
-  await jobs.idle()
-  assert.equal(attempt, 2)
-  assert.equal(captured[0]?.outputAvailable, true)
-  assert.ok(captured[0]?.error instanceof Error)
-  assert.match(jobs.report(), /diagnostic: \/private\/diagnostic\.json/)
-  assert.deepEqual(state.blocks, {})
-})
-
-test("diagnostic write failure does not hide the archive error", async () => {
-  const { state, units } = setup()
-  const jobs = new ArchiveJobs(() => {}, async () => { throw new Error("disk unavailable") })
-  jobs.start(state, units, model, async () => { throw new Error("generation failed") })
-  await jobs.idle()
-  assert.match(jobs.report(), /generation failed/)
-  assert.doesNotMatch(jobs.report(), /disk unavailable/)
-})
-
 test("idle includes superseded workers and rejects cancellation that does not stop them", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "Date"] })
   const { state, units, jobs } = setup()

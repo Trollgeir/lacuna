@@ -66,11 +66,8 @@ const capture = (state: SessionState, units: readonly Unit[], ranges: readonly R
 /** One job per session. The worker selects ranges; only apply crosses the archive-state seam. */
 export class ArchiveJobs {
   private readonly onChange: (job: ArchiveJobStatus) => void
-  private readonly diagnose?: (failure: { jobID: string; model: string; error: unknown; outputAvailable: boolean }) => Promise<string | undefined>
-
-  constructor(onChange: (job: ArchiveJobStatus) => void = () => {}, diagnose?: (failure: { jobID: string; model: string; error: unknown; outputAvailable: boolean }) => Promise<string | undefined>) {
+  constructor(onChange: (job: ArchiveJobStatus) => void = () => {}) {
     this.onChange = onChange
-    this.diagnose = diagnose
   }
 
   private next = 1
@@ -114,15 +111,13 @@ export class ArchiveJobs {
     const worker: Worker = { done: Promise.resolve(), signal, ...(signal.aborted ? { abortedAt: Date.now() } : {}) }
     const aborted = () => { worker.abortedAt = Date.now() }
     signal.addEventListener("abort", aborted, { once: true })
-    let output: string | undefined
     worker.done = Promise.resolve().then(async () => {
       if (job.controller.signal.aborted) return
-      output = await generate(prompt, signal)
+      const output = await generate(prompt, signal)
       if (job.status !== "running") return
       signal.throwIfAborted()
       let ranges: RangeInput[] = []
       let errors: string[] = []
-      let validationFailure: unknown
       let originalEntries: unknown[] = []
       const validate = (output: string, staged: readonly RangeInput[]) => {
         const entries = parseEntries(output)
@@ -135,7 +130,6 @@ export class ArchiveJobs {
         ranges = selection.ranges
         errors = selection.errors
       } catch (error) {
-        validationFailure = error
         errors = [reason(error)]
       }
       const plan = archivePlan(job.state, job.units, ranges)
@@ -145,11 +139,9 @@ export class ArchiveJobs {
         try {
           const suggestions = shortfall ? candidates(plan.projected, job.units) : undefined
           const retry = await generate(repairPrompt(errors, plan, suggestions), signal, [{ prompt, output }])
-          output = retry
           if (job.status !== "running") return
           signal.throwIfAborted()
           const selection = validate(retry, ranges)
-          validationFailure = undefined
           const replacements = selection.ranges.length - ranges.length
           ranges = selection.ranges
           const uncovered = hadErrors ? uncoveredSources(job.state, job.units, originalEntries, ranges) : []
@@ -160,12 +152,11 @@ export class ArchiveJobs {
           // still discards the job (including on source changes, compaction, or deletion).
           job.controller.signal.throwIfAborted()
           if (job.status !== "running") return
-          validationFailure = error
           errors = [reason(error)]
         }
       }
       if (!ranges.length) {
-        if (errors.length) throw validationFailure ?? new ArchiveError(errors.join("\n"))
+        if (errors.length) throw new ArchiveError(errors.join("\n"))
         job.status = "skipped"
         this.changed()
         return
@@ -175,14 +166,10 @@ export class ArchiveJobs {
       job.status = "ready"
       if (errors.length) job.detail = `Partial success: ${ranges.length} accepted range(s). ${errors.join(" ")}`
       this.changed()
-    }).catch(async (error: unknown) => {
+    }).catch((error: unknown) => {
       if (job.status !== "running") return
       job.status = "failed"
       job.detail = reason(error)
-      this.changed()
-      const path = await this.diagnose?.({ jobID: job.id, model: job.model, error, outputAvailable: output !== undefined }).catch(() => undefined)
-      if (this.job !== job || job.status !== "failed" || !path) return
-      job.detail += ` (diagnostic: ${path})`
       this.changed()
     }).finally(() => {
       signal.removeEventListener("abort", aborted)
