@@ -13,13 +13,13 @@ export const archiveExecution = async (
   const forks = new Map<string, { sessionID: string; ownerID: string; request: ModelContext; model: Model.Ref }>()
   let disposed = false
 
-  await ctx.session.hook("generate", (event) => {
+  const transform = (event: ModelContext) => {
     // Match our unique suffix, not just the session: /btw may run concurrently.
     const suffix = event.messages.at(-1)
     const prompt = suffix?.role === "user" && suffix.content.length === 1 && suffix.content[0]?.type === "text"
       ? suffix.content[0].text : undefined
     const fork = typeof prompt === "string" ? forks.get(prompt) : undefined
-    if (!fork || fork.sessionID !== event.sessionID) return
+    if (!fork || fork.sessionID !== event.sessionID) return false
     const request = fork.request
     if (disposed || modelKey(event.model) !== modelKey(fork.model)) {
       throw new ArchiveError("The model changed before the archive fork could start.")
@@ -31,9 +31,11 @@ export const archiveExecution = async (
     event.messages = [...request.messages, suffix!]
     event.tools = request.tools
     event.options = config ? { ...(config.model ? event.options : request.options), ...structuredClone(config.options) } : request.options
-  })
+    return true
+  }
 
   return {
+    transform,
     /** Capture now, not after waiting for an earlier worker to stop. */
     capture(primary: ModelContext) {
       const request = forkRequest(primary)
