@@ -14,6 +14,7 @@ import { registerTools } from "./tools.ts"
 import { makerFor, modelKey, stripAll, type ModelContext } from "./host.ts"
 import { readOptions } from "./options.ts"
 import { archiveExecution } from "./archive.ts"
+import { inheritFork } from "./fork.ts"
 
 interface Live {
   units: Unit[]
@@ -109,11 +110,20 @@ export default Plugin.define({
       }
     }
 
-    const load = async (sessionID: string) => {
+    const load = async (sessionID: string): Promise<SessionState> => {
       const session = sessionFor(sessionID)
       if (session.state) return session.state
       const stored = await ctx.storage.get(`session/${sessionID}`)
-      const state = isState(stored) ? stored : emptyState()
+      if (isState(stored)) {
+        session.state = stored
+        return stored
+      }
+      const info = await ctx.session.get({ sessionID })
+      const fork = info.fork
+      const state = fork
+        ? await serial(fork.sessionID, async () => inheritFork(ctx, sessionID, fork, info.time.created, await load(fork.sessionID)))
+        : emptyState()
+      if (fork) await save(sessionID, state)
       session.state = state
       return state
     }
@@ -252,6 +262,7 @@ export default Plugin.define({
       try {
         for await (const event of ctx.event.subscribe({ signal: events.signal })) {
           if (event.type === "session.deleted") await forget(event.data.sessionID).catch(() => {})
+          if (event.type === "session.forked") await serial(event.data.sessionID, async () => { await load(event.data.sessionID) }).catch(() => {})
           if (event.type !== "session.step.ended") continue
           if (event.data.finish === "error") continue
           await record(event.data.sessionID, event.created, promptTokens(event.data.tokens)).catch(() => {})
@@ -328,17 +339,33 @@ export default Plugin.define({
       return loaded.filter((unit): unit is Unit => Boolean(unit))
     }
     /** The host transcript as units, with archived units that compaction removed put back in front. */
-    const prepare = async (sessionID: string, incoming: readonly Msg[]) => {
+    const prepareUnits = async (sessionID: string, incoming: readonly Msg[], state: SessionState) => {
       const make = makerFor(incoming)
-      const state = await load(sessionID)
       const current = groupUnits(stripAll(incoming, make))
-      const before = state.nextRef
       assignRefs(state, current)
       const units = [...(await detachedUnits(sessionID, state, current, make)), ...current]
+      return { make, current, units }
+    }
+    const prepare = async (sessionID: string, incoming: readonly Msg[]) => {
+      const state = await load(sessionID)
+      const before = state.nextRef
+      const { make, current, units } = await prepareUnits(sessionID, incoming, state)
       const stored = await storeSnapshots(sessionID, state, units)
       if (stored || state.nextRef !== before) await save(sessionID, state)
       return { make, state, current, units }
     }
+
+    await ctx.session.hook("generate", async (event) => {
+      if (execution.transform(event)) return
+      await serial(event.sessionID, async () => {
+        const incoming = event.messages as unknown as Msg[]
+        if (!incoming.length) return
+        const state = structuredClone(await load(event.sessionID))
+        const { make, units } = await prepareUnits(event.sessionID, incoming, state)
+        event.system.push({ type: "text", text: GUIDANCE } as (typeof event.system)[number])
+        event.messages = projectContext(state, units, make).messages as unknown as typeof event.messages
+      })
+    })
 
     await ctx.session.hook("compaction", (event) => withArchiveIdle(event.sessionID, async () => {
       const incoming = event.messages as unknown as Msg[]
