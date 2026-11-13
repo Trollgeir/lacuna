@@ -7,6 +7,7 @@ import { search } from "../src/core/search.ts"
 import { archive, assignRefs, refsOf, restore } from "../src/core/state.ts"
 import { detachedRefs, markSnapshotted, prepareCompaction, unitFromSnapshot, unsnapshotted } from "../src/core/compaction.ts"
 import { candidates } from "../src/core/archive/candidates.ts"
+import { pruneCatalogs } from "../src/core/catalog.ts"
 import { emptyState, type Msg } from "../src/core/types.ts"
 import { groupUnits } from "../src/core/units.ts"
 
@@ -57,53 +58,65 @@ test("groups tool results with their assistant call and assigns stable refs", ()
 })
 
 test("archive replaces a range into a summary and keeps tool pairs intact", () => {
-  const original = transcript()
-  const old = catalog("old", "OLD_CATALOG")
-  const latest = catalog("latest", "LATEST_CATALOG")
-  const units = groupUnits([old, ...original.slice(0, 3), latest, ...original.slice(3)])
-  const state = emptyState()
-  assignRefs(state, units)
-  const [result] = archive(state, units, [{ start: state.refs.old!, end: state.refs.a2!, summary: "Config port is 8080.", topic: "config" }])
+  const { state, units } = setup()
+  const [result] = archive(state, units, [{ start: "m1", end: "m3", summary: "Config port is 8080.", topic: "config" }])
   assert.equal(result!.block.id, "b1")
   const out = projectContext(state, units, identity)
-  assert.equal(out.messages.length, 4)
+  assert.equal(out.messages.length, 3)
   assert.doesNotMatch(JSON.stringify(out.messages), /tokens=/)
-  assert.match(texts(out.messages)[0]!, /<archived block="b1" range="m1–m5".*topic="config">\nConfig port is 8080\./)
-  assert.deepEqual(out.messages.filter((message) => message.role === "system"), [latest])
+  assert.match(texts(out.messages)[0]!, /<archived block="b1" range="m1–m3".*topic="config">\nConfig port is 8080\./)
   assert.ok(!out.messages.some((m) => m.role === "tool"))
   assert.ok(out.tokens < out.originalTokens)
-  restore(state, "b1")
-  assert.ok(projectContext(state, units).messages.some((message) => message.role === "tool"))
-  assert.deepEqual(projectContext(state, units).messages.filter((message) => message.role === "system"), [latest])
 })
 
-test("projection hides only superseded Code Mode updates and follows the current transcript", () => {
+test("committed catalog pruning preserves new updates and follows the current transcript", () => {
   const old = catalog("s1", "OLD_CATALOG")
   const middle = catalog(undefined, "MIDDLE_CATALOG")
   const latest = catalog("s3", "LATEST_CATALOG")
   const other: Msg = { id: "s2", role: "system", content: [{ type: "text", text: "OTHER_SYSTEM_INSTRUCTIONS" }] }
-  const lookalike: Msg = { id: "s4", role: "system", content: [{ type: "text", text: "The Code Mode tool catalog has changed. DIFFERENT_NOTICE" }] }
-  const multiPart: Msg = { ...catalog("s5", "MULTIPART_CATALOG"), content: [...catalog("s5", "MULTIPART_CATALOG").content, { type: "text", text: "EXTRA_SYSTEM_STATE" }] }
-  const userCopy = user("u1", String(old.content[0]!.text))
-  const messages = [old, userCopy, middle, other, latest, lookalike, multiPart, user("u2", "Continue")]
+  const messages = [old, user("u1", "Continue"), middle, other, latest, user("u2", "Continue")]
   const state = emptyState()
   const units = groupUnits(messages)
   assignRefs(state, units)
-  const before = structuredClone(messages)
+  assert.deepEqual(projectContext(state, units).messages.filter((message) => message.role === "system"), [old, middle, other, latest])
+  pruneCatalogs(state, units)
   const out = projectContext(state, units)
   const systems = out.messages.filter((message) => message.role === "system")
-  assert.deepEqual(systems, [other, latest, lookalike, multiPart])
-  assert.match(JSON.stringify(out.messages.filter((message) => message.role === "user")), /OLD_CATALOG/, "user text is not a catalog notice")
-  assert.equal(out.tokens, out.originalTokens, "automatic pruning is not reported as archived material")
-  assert.deepEqual(messages, before, "projection must not change the transcript")
-  assert.deepEqual(state.blocks, {})
-  const sized = units.map((unit) => ({ ...unit, tokens: 2000 }))
-  const systemRefs = new Set(sized.filter((unit) => unit.role === "system").map((unit) => unit.key && state.refs[unit.key]))
-  assert.ok(candidates(state, sized).every(({ start, end }) => !systemRefs.has(start) && !systemRefs.has(end)), "system notices cannot be archived for savings")
+  assert.deepEqual(systems, [other, latest])
 
   const reverted = projectContext(state, groupUnits(messages.slice(0, 4)))
-  assert.deepEqual(reverted.messages.filter((message) => message.role === "system"), [middle, other], "a revert makes the prior update current again")
-  assert.deepEqual(projectContext(state, groupUnits([old])).messages, [old], "a lone catalog is retained")
+  assert.deepEqual(reverted.messages.filter((message) => message.role === "system"), [old, middle, other], "a revert restores catalogs whose replacement disappeared")
+  const repeated: Msg = { role: "system", content: latest.content }
+  const appended = groupUnits([...messages, repeated, user("u3", "Next")])
+  assignRefs(state, appended)
+  assert.deepEqual(projectContext(state, appended).messages.slice(0, out.messages.length), out.messages, "a repeated new update must not change the existing prefix")
+  pruneCatalogs(state, appended)
+  assert.deepEqual(projectContext(state, appended).messages.filter((message) => message.role === "system"), [other, repeated])
+  assert.deepEqual(projectContext(state, units).messages.filter((message) => message.role === "system"), [other, latest], "reverting a later commit retains earlier pruning")
+})
+
+test("anonymous catalog markers distinguish repeated updates, reverts and forks", () => {
+  const first = { ...catalog(undefined, "SAME"), metadata: { sequence: 1 } }
+  const second = { ...catalog(undefined, "SAME"), metadata: { sequence: 2 } }
+  const tail = catalog(undefined, "TAIL")
+  const anchor = user("anchor", "Continue")
+  const state = emptyState()
+  const units = groupUnits([first, second, anchor])
+  assignRefs(state, units)
+  pruneCatalogs(state, units)
+  assert.deepEqual(projectContext(state, units).messages.filter((message) => message.role === "system"), [second])
+
+  const withTail = groupUnits([first, second, anchor, tail])
+  pruneCatalogs(state, withTail)
+  assert.deepEqual(projectContext(state, withTail).messages.filter((message) => message.role === "system"), [second, tail], "an unanchored tail cannot be pruned or used as a replacement")
+
+  const changedMetadata = groupUnits([{ ...first, metadata: { sequence: 3 } }, { ...second, metadata: { sequence: 4 } }, anchor])
+  assert.equal(projectContext(state, changedMetadata).messages.filter((message) => message.role === "system").length, 1, "hook metadata does not change catalog identity")
+  const forkedState = structuredClone(state)
+  forkedState.refs = { "fork-anchor": state.refs.anchor! }
+  const forked = groupUnits([first, second, user("fork-anchor", "Continue")])
+  assert.deepEqual(projectContext(forkedState, forked).messages.filter((message) => message.role === "system"), [second])
+  assert.deepEqual(projectContext(state, groupUnits([first, anchor])).messages.filter((message) => message.role === "system"), [first], "a changed anonymous run must not inherit the old decision")
 })
 
 test("archives survive missing endpoints and never hide newly revealed units", () => {
@@ -261,6 +274,18 @@ test("never puts ref tags inside assistant messages", () => {
   assert.match(result.value, /^<ref id="m3" [^>]*kind="tools:read"\/>\nfile body$/)
   // The plain reply (m2) has no tool result, so its tag rides on the next user message.
   assert.match(String(out[4]!.content[0]!.text), /^<ref id="m2" [^>]*kind="assistant"\/>\n<ref id="m4" [^>]*kind="user"\/>$/)
+
+  for (const value of ["failed", new Error("broken")]) {
+    const failure: Msg = { role: "tool", content: [{ type: "tool-result", id: "c2", name: "read", result: { type: "error", value } }] }
+    const failedUnits = groupUnits([user("u", "read"), assistant("a", "Reading", "c2"), failure])
+    const failedState = emptyState()
+    assignRefs(failedState, failedUnits)
+    const projected = projectContext(failedState, failedUnits).messages
+    const result = projected.at(-1)!.content[0]!.result as { type: string; value: string }
+    assert.equal(result.type, "error")
+    assert.equal(result.value, `<ref id="m2" kind="tools:read"/>\n${String(value)}`)
+    assert.deepEqual(failure.content[0]!.result, { type: "error", value }, "projection must not mutate the failed result")
+  }
 })
 
 test("search finds details in summaries and in the archived originals", () => {

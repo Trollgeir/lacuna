@@ -20,7 +20,8 @@ and leaves the main agent free to continue working. The main agent can bring the
 
 Lacuna builds a **projection** of the session for each model request: archived ranges appear as summaries,
 while stored session history stays unchanged. Disable the plugin and the original conversation is available again.
-It also hides superseded Code Mode catalog updates, keeping the latest update intact.
+When summaries are applied, it also hides safely identifiable superseded Code Mode catalog updates, keeping the latest update intact.
+New updates remain visible until another successful archive; anonymous updates without a stable anchor are left visible.
 
 Blocks remember the unit identities actually archived, so model switches can remove individual messages without
 replaying the surviving archived content. Newly revealed messages stay visible. If none of a block's members are

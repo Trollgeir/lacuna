@@ -98,9 +98,12 @@ test("worker selects ranges from a snapshot and commits only at a later request"
 
   jobs.start(state, units, model, async () => output())
   await jobs.idle()
-  const updated = groupUnits([...source, catalog("latest")])
-  assert.equal(jobs.apply(state, updated, model), undefined)
-  assert.match(jobs.report(), /discarded.*targeted material changed/i)
+  const updated = groupUnits([...source, catalog("latest"), user("u4", "Continue")])
+  assignRefs(state, updated)
+  const updatedCandidate = jobs.apply(state, updated, model)!
+  assert.ok(updatedCandidate, "a new catalog does not change the selected source before commit")
+  assert.doesNotMatch(JSON.stringify(projectContext(updatedCandidate, updated).messages), /# Code Mode\\nold/)
+  assert.match(JSON.stringify(projectContext(updatedCandidate, updated).messages), /latest/)
 })
 
 test("worker can archive across an unidentified latest user without undefined protection refs", async () => {
@@ -316,6 +319,24 @@ test("archive plan uses a 20% target, adds only new ranges, and stops after one 
   await jobs.idle()
   assert.equal(calls, 1, "no follow-up when the initial reduction meets the target")
   assert.equal(jobs.apply(state, units, model)!.blocks.b1!.summary, additional.summary)
+
+  const catalogState = emptyState()
+  const catalogUnits = groupUnits([
+    user("u1", "First. ".repeat(100)), catalog("old ".repeat(5000)),
+    { id: "a1", role: "assistant", content: [{ type: "text", text: "Later. ".repeat(100) }] },
+    catalog("new"), user("u2", "Protected"),
+  ])
+  assignRefs(catalogState, catalogUnits)
+  const wide = { start: "m1", end: "m2", summary: "Oversized. ".repeat(200) }
+  assert.equal(stageRanges(catalogState, catalogUnits, [], [wide]).ranges.length, 0, "range validation must not count catalog pruning as summary savings")
+  const short = { ...wide, summary: "The discussion." }
+  const withCatalog = new ArchiveJobs()
+  let catalogCalls = 0
+  withCatalog.start(catalogState, catalogUnits, model, async () => { catalogCalls++; return JSON.stringify([short]) })
+  await withCatalog.idle()
+  assert.equal(catalogCalls, 1, "the plan includes catalog pruning when measuring its reduction")
+  const applied = withCatalog.apply(catalogState, catalogUnits, model)!
+  assert.doesNotMatch(JSON.stringify(projectContext(applied, catalogUnits).messages), /old old old/)
 })
 
 test("repair completeness follows source coverage when replacements split or merge", async () => {
@@ -370,12 +391,6 @@ test("range validation returns all independent issues as structured data", () =>
   assert.deepEqual(uncoveredSources(state, units, sources, split), [{ from: 2, to: 2 }])
   assert.deepEqual(uncoveredSources(state, units, sources, [range]), [])
   assert.deepEqual(uncoveredSources(state, units, sources, []), [{ from: 0, to: 1 }, { from: 2, to: 2 }])
-
-  const catalogs = groupUnits([user("a", "Short request"), catalog("obsolete ".repeat(2000)), user("b", "Work"), catalog("current"), user("c", "Continue")])
-  const fresh = emptyState()
-  assignRefs(fresh, catalogs)
-  const oversized = stageRanges(fresh, catalogs, [], [{ start: "m1", end: "m2", summary: "Verbose summary. ".repeat(100) }])
-  assert.equal(oversized.errors[0]!.issue.kind, "summary-size", "hidden catalogs must not inflate the source size")
 })
 
 test("a changed or removed source or model switch cancels a running job", async () => {

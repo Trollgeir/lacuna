@@ -43,6 +43,11 @@ export interface Block {
   parent?: string
 }
 
+/** A catalog identity, or an anonymous unit anchored to the next identified unit. */
+export type CatalogMarker =
+  | { readonly ref: string; readonly digest: string }
+  | { readonly before: string; readonly offset: number; readonly digest: string }
+
 export interface SessionState {
   version: 1
   nextRef: number
@@ -50,6 +55,8 @@ export interface SessionState {
   /** Unit key to ref ID, e.g. `msg_abc` → `m12`. */
   refs: Record<string, string>
   blocks: Record<string, Block>
+  /** Catalogs hidden at archive commits, conditional on their recorded replacement surviving. */
+  catalogPruning?: { readonly target: CatalogMarker; readonly replacement: CatalogMarker }[]
   /** Refs whose original messages are stored, so they outlive compaction. */
   snapshots?: Record<string, true>
   /** Ref allocation watermark at compaction; used only to distinguish checkpoint/revert boundaries. */

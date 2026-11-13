@@ -1,24 +1,13 @@
 import { activeSpans, refsOf } from "./state.ts"
+import { hiddenCatalogs } from "./catalog.ts"
 import type { Block, Msg, Part, SessionState, Unit } from "./types.ts"
 import { messagesText } from "./units.ts"
 
 const refTag = (ref: string, unit: Unit) => `<ref id="${ref}" kind="${unit.label}"/>`
 
-const CATALOG_UPDATE = "The Code Mode tool catalog has changed. This catalog supersedes the previous Code Mode tool catalog.\n\n# Code Mode\n"
-
-/** Only complete, explicitly superseding catalog notices are safe to hide. */
-export const supersededCatalogs = (units: readonly Unit[]): ReadonlySet<Unit> => {
-  const catalogs = units.filter((unit) => {
-    if (unit.role !== "system" || unit.messages.length !== 1) return false
-    const content = unit.messages[0]!.content
-    return content.length === 1 && content[0]!.type === "text" && typeof content[0]!.text === "string" && content[0]!.text.startsWith(CATALOG_UPDATE)
-  })
-  return new Set(catalogs.slice(0, -1))
-}
-
 /** Count projected text, including archive wrappers and content that remains visible. */
-export const contextCharacters = (state: SessionState, units: readonly Unit[], superseded?: ReadonlySet<Unit>): number =>
-  messagesText(projectContext(state, units, undefined, superseded).messages).length
+export const contextCharacters = (state: SessionState, units: readonly Unit[], hidden?: ReadonlySet<Unit>): number =>
+  messagesText(projectContext(state, units, undefined, hidden).messages).length
 
 const blockText = (block: Block) => {
   const topic = block.topic ? ` topic="${block.topic.replaceAll('"', "'")}"` : ""
@@ -71,6 +60,18 @@ const tagToolResult = (part: Part, tag: string): Part | undefined => {
     case "text":
     case "error-text":
       return { ...part, result: { ...result, value: `${tag}\n${String(result.value ?? "")}` } }
+    case "error": {
+      const value = result.value
+      const prototype = typeof value === "object" && value !== null && !Array.isArray(value) ? Object.getPrototypeOf(value) : undefined
+      try {
+        const text = Array.isArray(value) || prototype === Object.prototype || prototype === null
+          ? JSON.stringify(value) ?? String(value)
+          : String(value)
+        return { ...part, result: { ...result, value: `${tag}\n${text}` } }
+      } catch {
+        return { ...part, result: { ...result, value: `${tag}\n${String(value)}` } }
+      }
+    }
     case "content":
       return Array.isArray(result.value) ? { ...part, result: { ...result, value: [{ type: "text", text: tag }, ...result.value] } } : undefined
     case "json":
@@ -96,7 +97,7 @@ const tagUnitResults = (unit: Unit, tag: string, make: MakeMessage): Msg[] | und
   return tagged ? messages : undefined
 }
 
-export const projectContext = (state: SessionState, units: readonly Unit[], make: MakeMessage = (message) => message, superseded = supersededCatalogs(units)): ContextProjection => {
+export const projectContext = (state: SessionState, units: readonly Unit[], make: MakeMessage = (message) => message, hidden = hiddenCatalogs(state, units)): ContextProjection => {
   const refs = refsOf(state, units)
   const active = activeSpans(state, units)
   const resolved = new Set(active.map((span) => span.block.id))
@@ -122,7 +123,7 @@ export const projectContext = (state: SessionState, units: readonly Unit[], make
         tokens += Math.ceil(text.length / 4)
       }
       const unit = units[i]!
-      if (superseded.has(unit)) continue
+      if (hidden.has(unit)) continue
       originalTokens += unit.tokens
       // Mid-conversation system messages carry host state, so they survive archiving.
       if (unit.role === "system") {
@@ -133,7 +134,7 @@ export const projectContext = (state: SessionState, units: readonly Unit[], make
     }
 
     const unit = units[i]!
-    if (superseded.has(unit)) continue
+    if (hidden.has(unit)) continue
     const ref = refs[i]
     const tag = ref ? refTag(ref, unit) : ""
     originalTokens += unit.tokens
