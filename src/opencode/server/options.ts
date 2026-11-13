@@ -1,11 +1,19 @@
-import { GenerationOptions } from "@opencode/ai/effect"
 import { Model } from "@opencode/plugin"
 import { Schema } from "effect"
 import { ArchiveError } from "../../core/state.ts"
 import type { ModelContext } from "./host.ts"
 
 const requestOptions = Schema.StructWithRest(
-  Schema.Struct(GenerationOptions.fields),
+  Schema.Struct({
+    maxTokens: Schema.optional(Schema.Number),
+    temperature: Schema.optional(Schema.Number),
+    topP: Schema.optional(Schema.Number),
+    topK: Schema.optional(Schema.Number),
+    frequencyPenalty: Schema.optional(Schema.Number),
+    presencePenalty: Schema.optional(Schema.Number),
+    seed: Schema.optional(Schema.Number),
+    stop: Schema.optional(Schema.Array(Schema.String)),
+  }),
   [Schema.Record(Schema.String, Schema.Unknown)],
 )
 

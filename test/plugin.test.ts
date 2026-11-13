@@ -55,7 +55,7 @@ const setup = async (options: { archiveAt?: number; archiveMode?: unknown; archi
   let failCommit = false
   let failSave = false
   const makeEvent = (messages = transcript(), sessionID = "s1"): HookEvent => ({
-    sessionID, messages: messages.map((message) => Message.make(message as ConstructorParameters<typeof Message>[0])),
+    sessionID, messages: messages.map((message) => Message.make(message as Parameters<typeof Message.make>[0])),
     system: [{ type: "text", text: "Main agent instructions" }],
     model: { providerID: "provider", id: "model" },
     agent: "build",
@@ -227,6 +227,7 @@ test("archiveModel uses a registered model and variant without changing the prim
 })
 
 test("archiveModel options without a model inherit the primary model, variant and remaining settings", async (t) => {
+  await assert.rejects(setup({ archiveModel: { options: { temperature: "hot" } } }), /Invalid archiveModel\.options/)
   const harness = await setup({ archiveAt: 500, archiveModel: { options: { maxTokens: 8192, reasoningEffort: "low" } } })
   t.after(harness.cleanup)
   harness.models[0]!.variants.push({ id: "high" })
@@ -259,10 +260,17 @@ test("failed archive generation cleans up without fallback or context mutation",
 test("archive ranges spanning unidentified host messages become ready and keep those messages visible", async (t) => {
   const harness = await setup({ archiveAt: 1_000_000 })
   t.after(harness.cleanup)
-  const messages: Msg[] = [transcript()[0]!, { role: "system", content: [{ type: "text", text: "UNIDENTIFIED_HOST_STATE" }] }, ...transcript().slice(1)]
-  await harness.hook("context", messages)
+  const update = (body: string): Msg => ({ role: "system", content: [{ type: "text", text: `The Code Mode tool catalog has changed. This catalog supersedes the previous Code Mode tool catalog.\n\n# Code Mode\n${body}` }] })
+  const messages: Msg[] = [transcript()[0]!, update("old_catalog"), { role: "system", content: [{ type: "text", text: "UNIDENTIFIED_HOST_STATE" }] }, ...transcript().slice(1, 3), update("latest_catalog"), transcript()[3]!]
+  const main = await harness.hook("context", messages)
+  const generate = await harness.hook("generate", messages)
+  for (const event of [main, generate]) {
+    assert.doesNotMatch(JSON.stringify(event.messages), /old_catalog/)
+    assert.match(JSON.stringify(event.messages), /latest_catalog/)
+  }
   await harness.invoke("archive", {})
   await setImmediate()
+  assert.deepEqual(harness.requests[0]!.messages.slice(0, -1), main.messages)
   harness.generation.resolve(output)
   await setImmediate()
   const ready = (await harness.readStats()).stats!
@@ -271,6 +279,8 @@ test("archive ranges spanning unidentified host messages become ready and keep t
   const next = await harness.hook("context", messages)
   assert.match(JSON.stringify(next.messages), /<archived block/)
   assert.match(JSON.stringify(next.messages), /UNIDENTIFIED_HOST_STATE/)
+  assert.match(JSON.stringify(next.messages), /latest_catalog/)
+  assert.doesNotMatch(JSON.stringify(next.messages), /old_catalog/)
   assert.doesNotMatch(JSON.stringify(next.messages), /port 8080 zebra/)
   const applied = (await harness.readStats()).stats!
   assert.equal(applied.job!.status, "applied")
@@ -537,16 +547,19 @@ test("archive forks preserve host Message prototypes, provider metadata and bina
   class HostAsset extends Media.Asset {}
   const harness = await setup()
   t.after(harness.cleanup)
-  const main = await harness.hook("context", transcript().map((message) => new Message(message as ConstructorParameters<typeof Message>[0])))
-  const media = new Message({ role: "user", providerMetadata: { openai: { itemID: "cached-item" } }, content: [
+  const incoming = transcript().map((message) => Message.make(message as Parameters<typeof Message.make>[0]))
+  const main = await harness.hook("context", incoming)
+  assert.deepEqual(main.messages.map((message) => message.constructor), incoming.map((message) => message.constructor))
+  const media = Message.make({ role: "user", providerMetadata: { openai: { itemID: "cached-item" } }, content: [
     { type: "media", media: new HostAsset({ source: { type: "bytes", mediaType: "image/png", data: new Uint8Array([1, 2, 3]) } }) },
   ] })
+  assert.equal(media.role, "user")
   main.messages.push(media)
   main.system.push({ type: "text", text: "Extra primary instructions" })
   await harness.finish()
   const fork = harness.requests[0]!
   assert.deepEqual(fork.messages.slice(0, -1), main.messages)
-  assert.ok(fork.messages.slice(0, -1).every((message) => message instanceof Message))
+  assert.deepEqual(fork.messages.slice(0, -1).map((message) => message.constructor), main.messages.map((message) => message.constructor))
   const clonedMedia = fork.messages.at(-2)!.content[0] as unknown as { media: { source: { data: Uint8Array } } }
   assert.ok(clonedMedia.media.source.data instanceof Uint8Array)
   assert.deepEqual(clonedMedia.media.source.data, new Uint8Array([1, 2, 3]))
