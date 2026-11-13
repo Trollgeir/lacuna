@@ -1,4 +1,5 @@
-import { contextCharacters, supersededCatalogs } from "../projection.ts"
+import { contextCharacters } from "../projection.ts"
+import { hiddenCatalogs, pruneCatalogs } from "../catalog.ts"
 import { archive, inspectRange, type RangeInput } from "../state.ts"
 import type { SessionState, Unit } from "../types.ts"
 import { entryErrors } from "./output.ts"
@@ -11,7 +12,7 @@ export const TARGET_REDUCTION = 0.2
 /** Validate on clones, retaining independent entries without choosing winners among conflicts. */
 export const stageRanges = (state: SessionState, units: readonly Unit[], staged: readonly RangeInput[], entries: readonly unknown[]) => {
   const errors: ValidationError[] = []
-  const superseded = supersededCatalogs(units)
+  const hidden = hiddenCatalogs(state, units)
   const candidates = entries.flatMap((entry, index) => {
     const raw = entry && typeof entry === "object" && !Array.isArray(entry) ? entry as Record<string, unknown> : {}
     const issues = entryErrors(entry)
@@ -26,8 +27,8 @@ export const stageRanges = (state: SessionState, units: readonly Unit[], staged:
       copy.nextBlock += staged.length + index
       archive(copy, units, [range])
       const selected = units.slice(bounds.from, bounds.to + 1)
-      const source = contextCharacters(state, selected, superseded)
-      const replacement = contextCharacters(copy, selected, superseded)
+      const source = contextCharacters(state, selected, hidden)
+      const replacement = contextCharacters(copy, selected, hidden)
       if (!source) issues.push({ kind: "empty-source", start: range.start, end: range.end })
       else if (replacement >= source) {
         issues.push({ kind: "summary-size", start: range.start, end: range.end, percentage: replacement / source * 100 })
@@ -60,7 +61,10 @@ export const stageRanges = (state: SessionState, units: readonly Unit[], staged:
 /** Measure the entire projected context and expose the staged state for candidate generation. */
 export const archivePlan = (state: SessionState, units: readonly Unit[], ranges: readonly RangeInput[]) => {
   const projected = structuredClone(state)
-  if (ranges.length) archive(projected, units, ranges)
+  if (ranges.length) {
+    archive(projected, units, ranges)
+    pruneCatalogs(projected, units)
+  }
   const before = contextCharacters(state, units)
   const after = contextCharacters(projected, units)
   return { ranges, projected, before, after, reduction: before ? (before - after) / before : 0 }

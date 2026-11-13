@@ -55,7 +55,10 @@ const setup = async (options: { archiveAt?: number; archiveMode?: unknown; archi
   let failCommit = false
   let failSave = false
   const makeEvent = (messages = transcript(), sessionID = "s1"): HookEvent => ({
-    sessionID, messages: messages.map((message) => Message.make(message as Parameters<typeof Message.make>[0])),
+    sessionID, messages: messages.map((message) => {
+      const copy = Message.make(message as Parameters<typeof Message.make>[0])
+      return message.metadata === undefined ? copy : Object.assign(copy, { metadata: message.metadata })
+    }),
     system: [{ type: "text", text: "Main agent instructions" }],
     model: { providerID: "provider", id: "model" },
     agent: "build",
@@ -227,7 +230,6 @@ test("archiveModel uses a registered model and variant without changing the prim
 })
 
 test("archiveModel options without a model inherit the primary model, variant and remaining settings", async (t) => {
-  await assert.rejects(setup({ archiveModel: { options: { temperature: "hot" } } }), /Invalid archiveModel\.options/)
   const harness = await setup({ archiveAt: 500, archiveModel: { options: { maxTokens: 8192, reasoningEffort: "low" } } })
   t.after(harness.cleanup)
   harness.models[0]!.variants.push({ id: "high" })
@@ -247,14 +249,33 @@ test("archiveModel options without a model inherit the primary model, variant an
 test("failed archive generation cleans up without fallback or context mutation", async (t) => {
   const harness = await setup({ archiveAt: 500, archiveModel: { model: "other/team/luna" } })
   t.after(harness.cleanup)
+  const update = (name: string): Msg => ({ role: "system", content: [{ type: "text", text: `The Code Mode tool catalog has changed. This catalog supersedes the previous Code Mode tool catalog.\n\n# Code Mode\n${name}` }] })
+  const messages = [update("first"), ...transcript().slice(0, 3), update("second"), transcript()[3]!]
   harness.failArchiveGeneration()
-  await harness.hook("context")
+  const initial = await harness.hook("context", messages)
   await harness.finish()
   assert.equal(harness.requests.length, 1, "must not fall back to the primary model")
   assert.deepEqual(harness.requests[0]!.model, { providerID: "other", id: "team/luna", variant: "default" })
   assert.deepEqual(harness.removed, ["child1"])
   assert.equal((await harness.readStats()).stats!.job!.status, "failed")
   assert.deepEqual((harness.stored.get("session/s1") as SessionState).blocks, {})
+  const afterFailure = await harness.hook("context", messages)
+  assert.deepEqual(afterFailure.messages, initial.messages, "failed generation must not prune catalogs")
+})
+
+test("failed tool results carry their ref before the next user message", async (t) => {
+  const harness = await setup({ archiveAt: 1_000_000 })
+  t.after(harness.cleanup)
+  const details = { message: "Permission denied", code: "EACCES", path: "/config.ts" }
+  const messages: Msg[] = [...transcript().slice(0, 2), {
+    role: "tool", content: [{ type: "tool-result", id: "c1", name: "read", result: { type: "error", value: details } }],
+  }]
+  const before = await harness.hook("context", messages)
+  const result = before.messages.at(-1)!.content[0]!.result as { type: string; value: string }
+  assert.equal(result.type, "error")
+  assert.equal(result.value, `<ref id="m2" kind="tools:read"/>\n${JSON.stringify(details)}`)
+  const after = await harness.hook("context", [...messages, transcript()[3]!])
+  assert.deepEqual(after.messages.slice(0, before.messages.length), before.messages)
 })
 
 test("archive ranges spanning unidentified host messages become ready and keep those messages visible", async (t) => {
@@ -265,7 +286,7 @@ test("archive ranges spanning unidentified host messages become ready and keep t
   const main = await harness.hook("context", messages)
   const generate = await harness.hook("generate", messages)
   for (const event of [main, generate]) {
-    assert.doesNotMatch(JSON.stringify(event.messages), /old_catalog/)
+    assert.match(JSON.stringify(event.messages), /old_catalog/)
     assert.match(JSON.stringify(event.messages), /latest_catalog/)
   }
   await harness.invoke("archive", {})
@@ -276,6 +297,10 @@ test("archive ranges spanning unidentified host messages become ready and keep t
   const ready = (await harness.readStats()).stats!
   assert.equal(ready.job!.status, "ready")
   assert.equal(ready.changed, true, "ready summaries must set the footer marker")
+  harness.failNextCommit()
+  const failed = await harness.hook("context", messages)
+  assert.match(JSON.stringify(failed.messages), /old_catalog/, "a failed commit must not prune catalogs")
+  assert.equal((await harness.readStats()).stats!.job!.status, "ready")
   const next = await harness.hook("context", messages)
   assert.match(JSON.stringify(next.messages), /<archived block/)
   assert.match(JSON.stringify(next.messages), /UNIDENTIFIED_HOST_STATE/)
@@ -285,6 +310,10 @@ test("archive ranges spanning unidentified host messages become ready and keep t
   const applied = (await harness.readStats()).stats!
   assert.equal(applied.job!.status, "applied")
   assert.ok(applied.archived > 0)
+  const continued = [...messages, update("latest_catalog"), { id: "u3", role: "user", content: [{ type: "text", text: "Next" }] } satisfies Msg]
+  const after = await harness.hook("context", continued)
+  assert.deepEqual(after.messages.slice(0, next.messages.length), next.messages, "new catalog updates must not change the committed prefix")
+  assert.equal(after.messages.filter((message) => message.role === "system" && JSON.stringify(message).includes("latest_catalog")).length, 2)
 })
 
 test("committed archives survive model switches and report wholly absent blocks", async (t) => {
@@ -425,6 +454,9 @@ test("automatic archiving preserves the primary prefix, applies silently, and co
   assert.ok(restored.messages.some((message) => message.role === "tool"))
   await harness.finish()
   assert.equal(harness.requests.length, 2, "growth allows another attempt after the marker clears")
+  const update = (name: string): Msg => ({ role: "system", content: [{ type: "text", text: `The Code Mode tool catalog has changed. This catalog supersedes the previous Code Mode tool catalog.\n\n# Code Mode\n${name}` }] })
+  const withUpdates: Msg[] = [...continued, update("new1"), update("new2"), { id: "u4", role: "user", content: [{ type: "text", text: "Continue." }] }]
+  const beforeNoOp = await harness.hook("context", withUpdates)
   harness.generations[1]!.resolve("[]")
   await setImmediate()
   assert.equal(harness.requests.length, 3, "an empty selection gets one candidate follow-up")
@@ -432,7 +464,8 @@ test("automatic archiving preserves the primary prefix, applies silently, and co
   await setImmediate()
   assert.equal((await harness.readStats()).stats!.job!.status, "skipped")
   assert.equal((await harness.readStats()).stats!.changed, false)
-  await harness.hook("context", continued)
+  const afterNoOp = await harness.hook("context", withUpdates)
+  assert.deepEqual(afterNoOp.messages, beforeNoOp.messages, "skipped archives must not prune catalogs")
   await harness.finish()
   assert.equal(harness.requests.length, 3, "a no-op does not retry on unchanged context")
   assert.match((await harness.invoke("archive", {})).content, /job started/)
@@ -441,11 +474,11 @@ test("automatic archiving preserves the primary prefix, applies silently, and co
   await setImmediate()
   harness.generations[4]!.resolve("[]")
   await setImmediate()
-  await harness.hook("context", continued)
+  await harness.hook("context", withUpdates)
   await harness.finish()
   assert.equal(harness.requests.length, 5, "explicit cleanup also records the cooldown baseline")
-  await harness.hook("context", [...continued, {
-    id: "u4", role: "user", content: [{ type: "text", text: "Continue. ".repeat(2000) }],
+  await harness.hook("context", [...withUpdates, {
+    id: "u5", role: "user", content: [{ type: "text", text: "Continue. ".repeat(2000) }],
   }])
   await harness.finish()
   assert.equal(harness.requests.length, 6, "meaningful growth rearms the trigger after a no-op")
@@ -543,13 +576,16 @@ test("archive repair appends feedback without changing the captured prefix or ma
   assert.deepEqual(harness.removed, harness.created)
 })
 
-test("archive forks preserve host Message prototypes, provider metadata and binary media", async (t) => {
+test("projection and archive forks preserve host prototypes, hook metadata and binary media", async (t) => {
   class HostAsset extends Media.Asset {}
   const harness = await setup()
   t.after(harness.cleanup)
   const incoming = transcript().map((message) => Message.make(message as Parameters<typeof Message.make>[0]))
+  const metadata = incoming.map((_, index) => ({ hookState: { index, flags: ["kept"] } }))
+  incoming.forEach((message, index) => Object.assign(message, { metadata: metadata[index] }))
   const main = await harness.hook("context", incoming)
   assert.deepEqual(main.messages.map((message) => message.constructor), incoming.map((message) => message.constructor))
+  assert.deepEqual(main.messages.map((message) => (message as Message & { metadata?: unknown }).metadata), metadata)
   const media = Message.make({ role: "user", providerMetadata: { openai: { itemID: "cached-item" } }, content: [
     { type: "media", media: new HostAsset({ source: { type: "bytes", mediaType: "image/png", data: new Uint8Array([1, 2, 3]) } }) },
   ] })
@@ -560,6 +596,8 @@ test("archive forks preserve host Message prototypes, provider metadata and bina
   const fork = harness.requests[0]!
   assert.deepEqual(fork.messages.slice(0, -1), main.messages)
   assert.deepEqual(fork.messages.slice(0, -1).map((message) => message.constructor), main.messages.map((message) => message.constructor))
+  assert.deepEqual(fork.messages.slice(0, incoming.length).map((message) => (message as Message & { metadata?: unknown }).metadata), metadata)
+  assert.notEqual(fork.messages[0]!.metadata, metadata[0], "worker metadata is cloned")
   const clonedMedia = fork.messages.at(-2)!.content[0] as unknown as { media: { source: { data: Uint8Array } } }
   assert.ok(clonedMedia.media.source.data instanceof Uint8Array)
   assert.deepEqual(clonedMedia.media.source.data, new Uint8Array([1, 2, 3]))

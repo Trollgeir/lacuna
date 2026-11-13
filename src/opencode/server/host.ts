@@ -7,12 +7,17 @@ export type ModelContext = Extract<Parameters<Parameters<Plugin.Context["session
 
 export const modelKey = (model: ModelContext["model"]) => `${model.providerID}/${model.id}#${model.variant === "default" ? "" : model.variant ?? ""}`
 
+// OpenCode adds hook-only metadata outside the Message schema; constructors discard it.
+const withMetadata = <T extends object>(copy: T, metadata: unknown): T =>
+  metadata === undefined ? copy : Object.assign(copy, { metadata })
+
 export const makerFor = (incoming: readonly Msg[]): MakeMessage => {
   const constructors = new Map(incoming.map((message) => [message.role, message.constructor as new (input: Msg) => Msg]))
   return (message) => {
     try {
       const Ctor = constructors.get(message.role)
-      return Ctor ? new Ctor(message) : Message.make(message as Parameters<typeof Message.make>[0]) as unknown as Msg
+      const copy = Ctor ? new Ctor(message) : Message.make(message as Parameters<typeof Message.make>[0]) as unknown as Msg
+      return withMetadata(copy, message.metadata)
     } catch {
       return message
     }
@@ -46,9 +51,10 @@ export const forkRequest = (request: ModelContext): ModelContext => {
         }
       }),
     } as typeof message
-    if (message.constructor === Object) return Message.make(copy as Parameters<typeof Message.make>[0])
+    const metadata = (copy as typeof copy & { readonly metadata?: unknown }).metadata
+    if (message.constructor === Object) return withMetadata(Message.make(copy as Parameters<typeof Message.make>[0]), metadata)
     const MessageCtor = message.constructor as new (input: typeof message) => typeof message
-    return new MessageCtor(copy)
+    return withMetadata(new MessageCtor(copy), metadata)
   })
   return {
     ...request,
