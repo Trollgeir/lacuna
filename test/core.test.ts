@@ -275,7 +275,15 @@ test("never puts ref tags inside assistant messages", () => {
   // The plain reply (m2) has no tool result, so its tag rides on the next user message.
   assert.match(String(out[4]!.content[0]!.text), /^<ref id="m2" [^>]*kind="assistant"\/>\n<ref id="m4" [^>]*kind="user"\/>$/)
 
-  for (const value of ["failed", new Error("broken")]) {
+  for (const [value, expected] of [
+    ["failed", "failed"],
+    [new Error("broken"), "Error: broken"],
+    [{ message: "failed", details: [1, true, null] }, '{"message":"failed","details":[1,true,null]}'],
+    [[1, "failed", null], '[1,"failed",null]'],
+    [{ message: undefined }, "[object Object]"],
+    [{ details: { code: NaN } }, "[object Object]"],
+    [[undefined, "failed"], ",failed"],
+  ] as const) {
     const failure: Msg = { role: "tool", content: [{ type: "tool-result", id: "c2", name: "read", result: { type: "error", value } }] }
     const failedUnits = groupUnits([user("u", "read"), assistant("a", "Reading", "c2"), failure])
     const failedState = emptyState()
@@ -283,7 +291,7 @@ test("never puts ref tags inside assistant messages", () => {
     const projected = projectContext(failedState, failedUnits).messages
     const result = projected.at(-1)!.content[0]!.result as { type: string; value: string }
     assert.equal(result.type, "error")
-    assert.equal(result.value, `<ref id="m2" kind="tools:read"/>\n${String(value)}`)
+    assert.equal(result.value, `<ref id="m2" kind="tools:read"/>\n${expected}`)
     assert.deepEqual(failure.content[0]!.result, { type: "error", value }, "projection must not mutate the failed result")
   }
 })

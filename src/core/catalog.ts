@@ -20,9 +20,11 @@ const fingerprint = (units: readonly Unit[]) => digest(structuredClone(units.map
 }))))
 
 /**
- * OpenCode's system messages lack IDs. Anchor each anonymous run to the next durable
- * ref and fingerprint the entire run, so later appends cannot acquire its identity.
- * An unanchored tail is left visible rather than risking a false match.
+ * OpenCode drops stored system-message IDs from context-hook messages. Preserving
+ * them upstream would allow direct identification instead of this workaround.
+ * Anchor each anonymous run to the next durable ref and fingerprint the entire
+ * run, so later appends cannot acquire its identity. An unanchored tail is left
+ * visible rather than risking a false match.
  */
 const markers = (state: SessionState, units: readonly Unit[]) => {
   const refs = refsOf(state, units)

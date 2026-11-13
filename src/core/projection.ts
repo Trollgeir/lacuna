@@ -1,3 +1,4 @@
+import { Schema } from "effect"
 import { activeSpans, refsOf } from "./state.ts"
 import { hiddenCatalogs } from "./catalog.ts"
 import type { Block, Msg, Part, SessionState, Unit } from "./types.ts"
@@ -48,6 +49,8 @@ interface ContextProjection {
 }
 
 const prependText = (message: Msg, text: string): Part[] => [{ type: "text", text }, ...message.content]
+const isJson = Schema.is(Schema.Json)
+const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown))
 
 /**
  * Put a tag at the start of a tool result's output. Returns undefined for result shapes it cannot carry.
@@ -64,8 +67,10 @@ const tagToolResult = (part: Part, tag: string): Part | undefined => {
       const value = result.value
       const prototype = typeof value === "object" && value !== null && !Array.isArray(value) ? Object.getPrototypeOf(value) : undefined
       try {
-        const text = Array.isArray(value) || prototype === Object.prototype || prototype === null
-          ? JSON.stringify(value) ?? String(value)
+        // Match OpenCode's error serialization before adding the ref.
+        const structured = Array.isArray(value) || prototype === Object.prototype || prototype === null
+        const text = structured && isJson(value)
+          ? encodeJson(value)
           : String(value)
         return { ...part, result: { ...result, value: `${tag}\n${text}` } }
       } catch {
