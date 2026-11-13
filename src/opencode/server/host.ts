@@ -8,11 +8,11 @@ export type ModelContext = Extract<Parameters<Parameters<Plugin.Context["session
 export const modelKey = (model: ModelContext["model"]) => `${model.providerID}/${model.id}#${model.variant === "default" ? "" : model.variant ?? ""}`
 
 export const makerFor = (incoming: readonly Msg[]): MakeMessage => {
-  const Ctor = incoming[0]?.constructor as (new (input: Msg) => Msg) | undefined
+  const constructors = new Map(incoming.map((message) => [message.role, message.constructor as new (input: Msg) => Msg]))
   return (message) => {
-    if (!Ctor) return message
     try {
-      return new Ctor(message)
+      const Ctor = constructors.get(message.role)
+      return Ctor ? new Ctor(message) : Message.make(message as Parameters<typeof Message.make>[0]) as unknown as Msg
     } catch {
       return message
     }
@@ -30,8 +30,7 @@ export const forkRequest = (request: ModelContext): ModelContext => {
   const messages = request.messages.map((message) => {
     // Host and plugin can load distinct copies of @opencode/ai. Each validates
     // Media.Asset by identity, so preserve the constructors from the host.
-    const MessageCtor = message.constructor === Object ? Message : message.constructor as typeof Message
-    return new MessageCtor({
+    const copy = {
       ...structuredClone({ ...message, content: [] }),
       content: message.content.map((part) => {
         if (part.type !== "media") return structuredClone(part)
@@ -46,7 +45,10 @@ export const forkRequest = (request: ModelContext): ModelContext => {
           }),
         }
       }),
-    })
+    } as typeof message
+    if (message.constructor === Object) return Message.make(copy as Parameters<typeof Message.make>[0])
+    const MessageCtor = message.constructor as new (input: typeof message) => typeof message
+    return new MessageCtor(copy)
   })
   return {
     ...request,
