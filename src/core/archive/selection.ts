@@ -1,4 +1,4 @@
-import { contextCharacters } from "../projection.ts"
+import { contextCharacters, supersededCatalogs } from "../projection.ts"
 import { archive, inspectRange, type RangeInput } from "../state.ts"
 import type { SessionState, Unit } from "../types.ts"
 import { entryErrors } from "./output.ts"
@@ -11,6 +11,7 @@ export const TARGET_REDUCTION = 0.2
 /** Validate on clones, retaining independent entries without choosing winners among conflicts. */
 export const stageRanges = (state: SessionState, units: readonly Unit[], staged: readonly RangeInput[], entries: readonly unknown[]) => {
   const errors: ValidationError[] = []
+  const superseded = supersededCatalogs(units)
   const candidates = entries.flatMap((entry, index) => {
     const raw = entry && typeof entry === "object" && !Array.isArray(entry) ? entry as Record<string, unknown> : {}
     const issues = entryErrors(entry)
@@ -25,8 +26,8 @@ export const stageRanges = (state: SessionState, units: readonly Unit[], staged:
       copy.nextBlock += staged.length + index
       archive(copy, units, [range])
       const selected = units.slice(bounds.from, bounds.to + 1)
-      const source = contextCharacters(state, selected)
-      const replacement = contextCharacters(copy, selected)
+      const source = contextCharacters(state, selected, superseded)
+      const replacement = contextCharacters(copy, selected, superseded)
       if (!source) issues.push({ kind: "empty-source", start: range.start, end: range.end })
       else if (replacement >= source) {
         issues.push({ kind: "summary-size", start: range.start, end: range.end, percentage: replacement / source * 100 })

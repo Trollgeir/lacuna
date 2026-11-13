@@ -1,4 +1,4 @@
-import { projectContext } from "../projection.ts"
+import { projectContext, supersededCatalogs } from "../projection.ts"
 import { archive, ArchiveError, protectedIndexes, refsOf, type RangeInput } from "../state.ts"
 import type { SessionState, Unit } from "../types.ts"
 import { archivePrompt } from "./prompt.ts"
@@ -50,6 +50,7 @@ const capture = (state: SessionState, units: readonly Unit[], ranges: readonly R
   // Compare plain snapshots on both sides: host media objects serialize differently
   // from their structured clones even when their contents are unchanged.
   const snapshot = structuredClone(units) as Unit[]
+  const superseded = supersededCatalogs(snapshot)
   const resolved = archive(copy, snapshot, ranges)
   return resolved.map(({ block, from, to }) => {
     const selected = snapshot.slice(from, to + 1)
@@ -58,7 +59,7 @@ const capture = (state: SessionState, units: readonly Unit[], ranges: readonly R
       start: block.start,
       end: block.end,
       fingerprint: JSON.stringify({ units: selected.map((unit) => ({ key: unit.key, messages: unit.messages })), children }),
-      source: JSON.stringify(projectContext(state, selected).messages),
+      source: JSON.stringify(projectContext(state, selected, undefined, superseded).messages),
     }
   })
 }

@@ -4,8 +4,21 @@ import { messagesText } from "./units.ts"
 
 const refTag = (ref: string, unit: Unit) => `<ref id="${ref}" kind="${unit.label}"/>`
 
+const CATALOG_UPDATE = "The Code Mode tool catalog has changed. This catalog supersedes the previous Code Mode tool catalog.\n\n# Code Mode\n"
+
+/** Only complete, explicitly superseding catalog notices are safe to hide. */
+export const supersededCatalogs = (units: readonly Unit[]): ReadonlySet<Unit> => {
+  const catalogs = units.filter((unit) => {
+    if (unit.role !== "system" || unit.messages.length !== 1) return false
+    const content = unit.messages[0]!.content
+    return content.length === 1 && content[0]!.type === "text" && typeof content[0]!.text === "string" && content[0]!.text.startsWith(CATALOG_UPDATE)
+  })
+  return new Set(catalogs.slice(0, -1))
+}
+
 /** Count projected text, including archive wrappers and content that remains visible. */
-export const contextCharacters = (state: SessionState, units: readonly Unit[]): number => messagesText(projectContext(state, units).messages).length
+export const contextCharacters = (state: SessionState, units: readonly Unit[], superseded?: ReadonlySet<Unit>): number =>
+  messagesText(projectContext(state, units, undefined, superseded).messages).length
 
 const blockText = (block: Block) => {
   const topic = block.topic ? ` topic="${block.topic.replaceAll('"', "'")}"` : ""
@@ -83,7 +96,7 @@ const tagUnitResults = (unit: Unit, tag: string, make: MakeMessage): Msg[] | und
   return tagged ? messages : undefined
 }
 
-export const projectContext = (state: SessionState, units: readonly Unit[], make: MakeMessage = (message) => message): ContextProjection => {
+export const projectContext = (state: SessionState, units: readonly Unit[], make: MakeMessage = (message) => message, superseded = supersededCatalogs(units)): ContextProjection => {
   const refs = refsOf(state, units)
   const active = activeSpans(state, units)
   const resolved = new Set(active.map((span) => span.block.id))
@@ -109,6 +122,7 @@ export const projectContext = (state: SessionState, units: readonly Unit[], make
         tokens += Math.ceil(text.length / 4)
       }
       const unit = units[i]!
+      if (superseded.has(unit)) continue
       originalTokens += unit.tokens
       // Mid-conversation system messages carry host state, so they survive archiving.
       if (unit.role === "system") {
@@ -119,6 +133,7 @@ export const projectContext = (state: SessionState, units: readonly Unit[], make
     }
 
     const unit = units[i]!
+    if (superseded.has(unit)) continue
     const ref = refs[i]
     const tag = ref ? refTag(ref, unit) : ""
     originalTokens += unit.tokens

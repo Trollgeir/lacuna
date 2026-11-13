@@ -16,7 +16,8 @@ export const candidates = (state: SessionState, units: readonly Unit[], limit = 
   const barriers = [
     ...spans.flatMap((span) => span.indexes.map((index) => ({ from: index, to: index }))),
     ...protectedIndexes(units).map((index) => ({ from: index, to: index })),
-    ...units.flatMap((unit, index) => unit.key ? [] : [{ from: index, to: index }]),
+    // System messages survive archive ranges, so they cannot contribute savings.
+    ...units.flatMap((unit, index) => unit.key && unit.role !== "system" ? [] : [{ from: index, to: index }]),
   ].sort((a, b) => a.from - b.from)
   const runs: (Candidate & { from: number })[] = []
   let from = 0

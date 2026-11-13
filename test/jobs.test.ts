@@ -11,6 +11,7 @@ import { Media } from "@opencode/ai/effect"
 
 const model = "provider/model"
 const user = (id: string, text: string): Msg => ({ id, role: "user", content: [{ type: "text", text }] })
+const catalog = (body: string): Msg => ({ role: "system", content: [{ type: "text", text: `The Code Mode tool catalog has changed. This catalog supersedes the previous Code Mode tool catalog.\n\n# Code Mode\n${body}` }] })
 const messages = (): Msg[] => [
   user("u1", "Investigate the config"),
   { id: "a1", role: "assistant", content: [{ type: "tool-call", id: "c1", name: "read", input: { path: "/config.ts" } }] },
@@ -70,7 +71,12 @@ test("idle includes superseded workers and rejects cancellation that does not st
 
 test("worker selects ranges from a snapshot and commits only at a later request", async (t) => {
   t.mock.method(Date, "now", () => 1000)
-  const { state, units, jobs } = setup()
+  const source = messages()
+  source.splice(1, 0, catalog("old"))
+  const state = emptyState()
+  const units = groupUnits(source)
+  assignRefs(state, units)
+  const jobs = new ArchiveJobs()
   const generation = deferred()
   assert.equal(jobs.start(state, units, model, () => generation.promise), "j1")
   assert.match(jobs.report(), /running/)
@@ -80,7 +86,7 @@ test("worker selects ranges from a snapshot and commits only at a later request"
   await setImmediate()
   assert.match(jobs.report(), /ready/)
   assert.deepEqual(state.blocks, {})
-  const more = groupUnits([...messages(), user("u3", "Continue with tests")])
+  const more = groupUnits([...source, user("u3", "Continue with tests")])
   assignRefs(state, more)
   const candidate = jobs.apply(state, more, model)!
   assert.equal(candidate.blocks.b1!.summary, range.summary)
@@ -89,6 +95,12 @@ test("worker selects ranges from a snapshot and commits only at a later request"
   assert.deepEqual(jobs.apply(state, more, model), candidate)
   jobs.committed()
   assert.match(jobs.report(), /applied/)
+
+  jobs.start(state, units, model, async () => output())
+  await jobs.idle()
+  const updated = groupUnits([...source, catalog("latest")])
+  assert.equal(jobs.apply(state, updated, model), undefined)
+  assert.match(jobs.report(), /discarded.*targeted material changed/i)
 })
 
 test("worker can archive across an unidentified latest user without undefined protection refs", async () => {
@@ -358,6 +370,12 @@ test("range validation returns all independent issues as structured data", () =>
   assert.deepEqual(uncoveredSources(state, units, sources, split), [{ from: 2, to: 2 }])
   assert.deepEqual(uncoveredSources(state, units, sources, [range]), [])
   assert.deepEqual(uncoveredSources(state, units, sources, []), [{ from: 0, to: 1 }, { from: 2, to: 2 }])
+
+  const catalogs = groupUnits([user("a", "Short request"), catalog("obsolete ".repeat(2000)), user("b", "Work"), catalog("current"), user("c", "Continue")])
+  const fresh = emptyState()
+  assignRefs(fresh, catalogs)
+  const oversized = stageRanges(fresh, catalogs, [], [{ start: "m1", end: "m2", summary: "Verbose summary. ".repeat(100) }])
+  assert.equal(oversized.errors[0]!.issue.kind, "summary-size", "hidden catalogs must not inflate the source size")
 })
 
 test("a changed or removed source or model switch cancels a running job", async () => {

@@ -259,10 +259,17 @@ test("failed archive generation cleans up without fallback or context mutation",
 test("archive ranges spanning unidentified host messages become ready and keep those messages visible", async (t) => {
   const harness = await setup({ archiveAt: 1_000_000 })
   t.after(harness.cleanup)
-  const messages: Msg[] = [transcript()[0]!, { role: "system", content: [{ type: "text", text: "UNIDENTIFIED_HOST_STATE" }] }, ...transcript().slice(1)]
-  await harness.hook("context", messages)
+  const update = (body: string): Msg => ({ role: "system", content: [{ type: "text", text: `The Code Mode tool catalog has changed. This catalog supersedes the previous Code Mode tool catalog.\n\n# Code Mode\n${body}` }] })
+  const messages: Msg[] = [transcript()[0]!, update("old_catalog"), { role: "system", content: [{ type: "text", text: "UNIDENTIFIED_HOST_STATE" }] }, ...transcript().slice(1, 3), update("latest_catalog"), transcript()[3]!]
+  const main = await harness.hook("context", messages)
+  const generate = await harness.hook("generate", messages)
+  for (const event of [main, generate]) {
+    assert.doesNotMatch(JSON.stringify(event.messages), /old_catalog/)
+    assert.match(JSON.stringify(event.messages), /latest_catalog/)
+  }
   await harness.invoke("archive", {})
   await setImmediate()
+  assert.deepEqual(harness.requests[0]!.messages.slice(0, -1), main.messages)
   harness.generation.resolve(output)
   await setImmediate()
   const ready = (await harness.readStats()).stats!
@@ -271,6 +278,8 @@ test("archive ranges spanning unidentified host messages become ready and keep t
   const next = await harness.hook("context", messages)
   assert.match(JSON.stringify(next.messages), /<archived block/)
   assert.match(JSON.stringify(next.messages), /UNIDENTIFIED_HOST_STATE/)
+  assert.match(JSON.stringify(next.messages), /latest_catalog/)
+  assert.doesNotMatch(JSON.stringify(next.messages), /old_catalog/)
   assert.doesNotMatch(JSON.stringify(next.messages), /port 8080 zebra/)
   const applied = (await harness.readStats()).stats!
   assert.equal(applied.job!.status, "applied")

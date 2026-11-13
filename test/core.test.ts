@@ -20,6 +20,9 @@ const tool = (call: string, output: string): Msg => ({
   role: "tool",
   content: [{ type: "tool-result", id: call, name: "read", result: { type: "text", value: output } }],
 })
+const catalog = (id: string | undefined, version: string): Msg => ({
+  ...(id ? { id } : {}), role: "system", content: [{ type: "text", text: `The Code Mode tool catalog has changed. This catalog supersedes the previous Code Mode tool catalog.\n\n# Code Mode\n${version}` }],
+})
 
 const transcript = (): Msg[] => [
   user("u1", "Please read the config"),
@@ -54,15 +57,53 @@ test("groups tool results with their assistant call and assigns stable refs", ()
 })
 
 test("archive replaces a range into a summary and keeps tool pairs intact", () => {
-  const { state, units } = setup()
-  const [result] = archive(state, units, [{ start: "m1", end: "m3", summary: "Config port is 8080.", topic: "config" }])
+  const original = transcript()
+  const old = catalog("old", "OLD_CATALOG")
+  const latest = catalog("latest", "LATEST_CATALOG")
+  const units = groupUnits([old, ...original.slice(0, 3), latest, ...original.slice(3)])
+  const state = emptyState()
+  assignRefs(state, units)
+  const [result] = archive(state, units, [{ start: state.refs.old!, end: state.refs.a2!, summary: "Config port is 8080.", topic: "config" }])
   assert.equal(result!.block.id, "b1")
   const out = projectContext(state, units, identity)
-  assert.equal(out.messages.length, 3)
+  assert.equal(out.messages.length, 4)
   assert.doesNotMatch(JSON.stringify(out.messages), /tokens=/)
-  assert.match(texts(out.messages)[0]!, /<archived block="b1" range="m1–m3".*topic="config">\nConfig port is 8080\./)
+  assert.match(texts(out.messages)[0]!, /<archived block="b1" range="m1–m5".*topic="config">\nConfig port is 8080\./)
+  assert.deepEqual(out.messages.filter((message) => message.role === "system"), [latest])
   assert.ok(!out.messages.some((m) => m.role === "tool"))
   assert.ok(out.tokens < out.originalTokens)
+  restore(state, "b1")
+  assert.ok(projectContext(state, units).messages.some((message) => message.role === "tool"))
+  assert.deepEqual(projectContext(state, units).messages.filter((message) => message.role === "system"), [latest])
+})
+
+test("projection hides only superseded Code Mode updates and follows the current transcript", () => {
+  const old = catalog("s1", "OLD_CATALOG")
+  const middle = catalog(undefined, "MIDDLE_CATALOG")
+  const latest = catalog("s3", "LATEST_CATALOG")
+  const other: Msg = { id: "s2", role: "system", content: [{ type: "text", text: "OTHER_SYSTEM_INSTRUCTIONS" }] }
+  const lookalike: Msg = { id: "s4", role: "system", content: [{ type: "text", text: "The Code Mode tool catalog has changed. DIFFERENT_NOTICE" }] }
+  const multiPart: Msg = { ...catalog("s5", "MULTIPART_CATALOG"), content: [...catalog("s5", "MULTIPART_CATALOG").content, { type: "text", text: "EXTRA_SYSTEM_STATE" }] }
+  const userCopy = user("u1", String(old.content[0]!.text))
+  const messages = [old, userCopy, middle, other, latest, lookalike, multiPart, user("u2", "Continue")]
+  const state = emptyState()
+  const units = groupUnits(messages)
+  assignRefs(state, units)
+  const before = structuredClone(messages)
+  const out = projectContext(state, units)
+  const systems = out.messages.filter((message) => message.role === "system")
+  assert.deepEqual(systems, [other, latest, lookalike, multiPart])
+  assert.match(JSON.stringify(out.messages.filter((message) => message.role === "user")), /OLD_CATALOG/, "user text is not a catalog notice")
+  assert.equal(out.tokens, out.originalTokens, "automatic pruning is not reported as archived material")
+  assert.deepEqual(messages, before, "projection must not change the transcript")
+  assert.deepEqual(state.blocks, {})
+  const sized = units.map((unit) => ({ ...unit, tokens: 2000 }))
+  const systemRefs = new Set(sized.filter((unit) => unit.role === "system").map((unit) => unit.key && state.refs[unit.key]))
+  assert.ok(candidates(state, sized).every(({ start, end }) => !systemRefs.has(start) && !systemRefs.has(end)), "system notices cannot be archived for savings")
+
+  const reverted = projectContext(state, groupUnits(messages.slice(0, 4)))
+  assert.deepEqual(reverted.messages.filter((message) => message.role === "system"), [middle, other], "a revert makes the prior update current again")
+  assert.deepEqual(projectContext(state, groupUnits([old])).messages, [old], "a lone catalog is retained")
 })
 
 test("archives survive missing endpoints and never hide newly revealed units", () => {
